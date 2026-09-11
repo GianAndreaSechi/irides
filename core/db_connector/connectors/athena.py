@@ -157,7 +157,6 @@ class AthenaConnector(BaseConnector):
 
         try:
             response = self._glue.get_table(
-                CatalogId=instance_name,
                 DatabaseName=schema_name,
                 Name=table_name,
             )
