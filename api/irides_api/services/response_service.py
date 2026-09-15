@@ -4,7 +4,7 @@ from typing import Any, Optional
 import toons
 from loguru import logger
 
-from api.src.models.response.generic_response import GenericResponse
+from api.irides_api.models.response.generic_response import GenericResponse
 
 def api_response(request: Request, message: str, data: Any):
     """
