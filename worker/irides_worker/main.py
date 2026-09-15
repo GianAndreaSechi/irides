@@ -7,7 +7,7 @@ executes them using the core library, and stores results back in Redis.
 Dependencies: core only (no api imports).
 
 Run:
-    python -m worker.src.main
+    python -m worker.irides_worker.main
 """
 import os
 import json
@@ -21,7 +21,7 @@ from core.db_connector.config_service import ConfigService
 from core.db_connector.job_store import JobStore
 from core.db_connector.manager import ConnectorManager
 from core.db_connector.exporting import ExportOptions
-from worker.src.services.scan_executor_service import ScanExecutorService
+from worker.irides_worker.services.scan_executor_service import ScanExecutorService
 
 
 # ---------------------------------------------------------------------------
