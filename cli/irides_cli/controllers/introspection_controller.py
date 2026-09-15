@@ -3,8 +3,8 @@
 import argparse
 from typing import Any
 
-from src.dto.requests import DescribeRequest, ScopeRequest, TablesRequest
-from src.services.introspection_service import IntrospectionService
+from irides_cli.dto.requests import DescribeRequest, ScopeRequest, TablesRequest
+from irides_cli.services.introspection_service import IntrospectionService
 
 
 class IntrospectionController:

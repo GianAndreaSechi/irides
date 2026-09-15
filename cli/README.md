@@ -6,11 +6,11 @@ Command-line interface for database introspection, built only on the `core` pack
 
 The CLI is organized by responsibility:
 
-- `src/presentation/`: command definitions and `argparse` parsing;
-- `src/controllers/`: maps command-line arguments to use cases;
-- `src/dto/`: immutable, typed request DTOs;
-- `src/services/`: live introspection and metadata operations using only `core`;
-- `src/main.py`: composition root, JSON serialization, and process-level error handling.
+- `irides_cli/presentation/`: command definitions and `argparse` parsing;
+- `irides_cli/controllers/`: maps command-line arguments to use cases;
+- `irides_cli/dto/`: immutable, typed request DTOs;
+- `irides_cli/services/`: live introspection and metadata operations using only `core`;
+- `irides_cli/main.py`: composition root, JSON serialization, and process-level error handling.
 
 ## Local installation
 

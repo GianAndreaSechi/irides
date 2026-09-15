@@ -4,8 +4,8 @@ import argparse
 import json
 from typing import Any
 
-from src.dto.requests import MetadataUpdateRequest, PageRequest
-from src.services.metadata_service import MetadataService
+from irides_cli.dto.requests import MetadataUpdateRequest, PageRequest
+from irides_cli.services.metadata_service import MetadataService
 
 
 class MetadataController:

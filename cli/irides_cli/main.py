@@ -4,9 +4,9 @@ import json
 import sys
 from typing import Any, List, Optional
 
-from src.controllers.introspection_controller import IntrospectionController
-from src.controllers.metadata_controller import MetadataController
-from src.presentation.parser import build_parser
+from irides_cli.controllers.introspection_controller import IntrospectionController
+from irides_cli.controllers.metadata_controller import MetadataController
+from irides_cli.presentation.parser import build_parser
 
 
 def _json_default(value: Any) -> Any:

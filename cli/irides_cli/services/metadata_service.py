@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional
 
 from core.db_connector.storage import BaseMetadataStore, get_metadata_store
 
-from src.dto.requests import MetadataUpdateRequest, PageRequest
+from irides_cli.dto.requests import MetadataUpdateRequest, PageRequest
 
 
 class MetadataService:

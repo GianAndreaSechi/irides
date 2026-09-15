@@ -11,7 +11,7 @@ from core.db_connector.models import Schema, Table
 from core.db_connector.storage import get_metadata_store
 from core.db_connector.exporting import ExportFormat, ExportOptions
 
-from src.dto.requests import DescribeRequest, ScopeRequest, TablesRequest
+from irides_cli.dto.requests import DescribeRequest, ScopeRequest, TablesRequest
 
 
 class IntrospectionService:
