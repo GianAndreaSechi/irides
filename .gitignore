@@ -219,3 +219,5 @@ storage
 .Trashes
 
 dev-workspace/
+
+pypi-install.md

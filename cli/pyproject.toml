@@ -38,5 +38,5 @@ where = ["."]
 include = ["irides_cli*"]
 
 [project.urls]
-"Source Code" = "https://github.com/GianAndreaSechi/irides/cli"
+"Source Code" = "https://github.com/GianAndreaSechi/irides/tree/main/cli"
 "Homepage" = "https://www.gianandreasechi.com"

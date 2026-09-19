@@ -70,5 +70,5 @@ dev = [
 ]
 
 [project.urls]
-"Source Code" = "https://github.com/GianAndreaSechi/irides/core"
+"Source Code" = "https://github.com/GianAndreaSechi/irides/tree/main/core"
 "Homepage" = "https://www.gianandreasechi.com"
