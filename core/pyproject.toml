@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "irides-core"
 version = "0.1.0"
-description = "Core library for Irides database introspection and metadata management"
+description = "A Python library for extracting structured database metadata to provide reliable context to AI systems and data-driven applications."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "Gian Andrea Sechi"}
+    {name = "Gian Andrea Sechi", email = "me@gianandreasechi.com"}
 ]
 keywords = ["database", "introspection", "metadata", "irides", "schema", "redis"]
 classifiers = [
@@ -68,3 +68,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.20.0",
 ]
+
+[project.urls]
+"Source Code" = "https://github.com/GianAndreaSechi/irides/core"
+"Homepage" = "https://www.gianandreasechi.com"
