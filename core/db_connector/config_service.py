@@ -7,9 +7,9 @@ from core.db_connector.configurations import get_db_configurations
 
 
 class ConfigService:
-    def __init__(self, connector_manager: ConnectorManager):
+    def __init__(self, connector_manager: ConnectorManager, config_file: Optional[str] = None):
         self.connector_manager = connector_manager
-        self.db_configurations: Dict[str, Dict[str, Any]] = get_db_configurations()
+        self.db_configurations: Dict[str, Dict[str, Any]] = get_db_configurations(config_file=config_file)
         logger.info(f"ConfigService: Initialized with {len(self.db_configurations)} database configurations.")
 
     def get_available_configurations(self) -> List[str]:

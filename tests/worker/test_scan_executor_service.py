@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 from core.db_connector.models import Schema, Table
 from core.db_connector.models.table_details import TableDescription, PrimaryKey
 from core.db_connector.exporting import ExportOptions
-from worker.src.services.scan_executor_service import ScanExecutorService
+from worker.irides_worker.services.scan_executor_service import ScanExecutorService
 
 
 def _make_table_desc(schema: str, table: str) -> TableDescription:
@@ -131,7 +131,7 @@ class TestExecuteAiDocs:
         mock_ai_service.last_error = None
 
         with patch(
-            "worker.src.services.scan_executor_service.AIDocumentationService",
+            "worker.irides_worker.services.scan_executor_service.AIDocumentationService",
             return_value=mock_ai_service,
         ):
             executor.execute("job-1", "cfg1", "host", "mydb", generate_ai_docs=True)
@@ -146,7 +146,7 @@ class TestExecuteAiDocs:
         mock_ai_service.last_error = "API error"
 
         with patch(
-            "worker.src.services.scan_executor_service.AIDocumentationService",
+            "worker.irides_worker.services.scan_executor_service.AIDocumentationService",
             return_value=mock_ai_service,
         ):
             executor.execute("job-1", "cfg1", "host", "mydb", generate_ai_docs=True)
@@ -165,7 +165,7 @@ class TestExecuteMetadata:
     def test_metadata_saved_when_enabled(self, executor):
         mock_store = MagicMock()
         with patch(
-            "worker.src.services.scan_executor_service.get_metadata_store",
+            "worker.irides_worker.services.scan_executor_service.get_metadata_store",
             return_value=mock_store,
         ):
             executor.execute("job-1", "cfg1", "host", "mydb", save_metadata=True)
@@ -175,7 +175,7 @@ class TestExecuteMetadata:
     def test_store_not_used_when_metadata_and_exports_are_disabled(self, executor):
         mock_store = MagicMock()
         with patch(
-            "worker.src.services.scan_executor_service.get_metadata_store",
+            "worker.irides_worker.services.scan_executor_service.get_metadata_store",
             return_value=mock_store,
         ):
             executor.execute(
@@ -192,7 +192,7 @@ class TestExecuteMetadata:
     def test_exports_run_when_metadata_is_disabled(self, executor):
         mock_store = MagicMock()
         with patch(
-            "worker.src.services.scan_executor_service.get_metadata_store",
+            "worker.irides_worker.services.scan_executor_service.get_metadata_store",
             return_value=mock_store,
         ):
             executor.execute("job-1", "cfg1", "host", "mydb", save_metadata=False)

@@ -19,21 +19,21 @@ from core.db_connector.models import (
 )
 from core.db_connector.cache_manager import CacheManager
 from core.db_connector.config_service import ConfigService
-from api.src.services.instance_service import InstanceService
-from api.src.services.schema_service import SchemaService
-from api.src.services.table_service import TableService
-from api.src.services.describe_table_service import DescribeTableService
+from api.irides_api.services.instance_service import InstanceService
+from api.irides_api.services.schema_service import SchemaService
+from api.irides_api.services.table_service import TableService
+from api.irides_api.services.describe_table_service import DescribeTableService
 
-from api.src.models.requests.connection_request import ConnectionRequest
-from api.src.models.requests.instance_request import InstanceRequest
-from api.src.models.requests.schema_request import SchemaRequest
-from api.src.models.requests.table_request import TableRequest
-from api.src.models.requests.describe_table_request import DescribeTableRequest
-from api.src.models.requests.scan_request import ScanRequest
-from api.src.services.response_service import api_response
-from api.src.services.scan_service import ScanService
+from api.irides_api.models.requests.connection_request import ConnectionRequest
+from api.irides_api.models.requests.instance_request import InstanceRequest
+from api.irides_api.models.requests.schema_request import SchemaRequest
+from api.irides_api.models.requests.table_request import TableRequest
+from api.irides_api.models.requests.describe_table_request import DescribeTableRequest
+from api.irides_api.models.requests.scan_request import ScanRequest
+from api.irides_api.services.response_service import api_response
+from api.irides_api.services.scan_service import ScanService
 from core.db_connector.job_store import JobStore
-from api.src.routers.metadata_router import router as metadata_router
+from api.irides_api.routers.metadata_router import router as metadata_router
 
 app = FastAPI(
     title="Multi DB Describer API",
@@ -326,4 +326,4 @@ async def serve_ui():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api.src.main:app", host="0.0.0.0", port=8000)
+    uvicorn.run("api.irides_api.main:app", host="0.0.0.0", port=8000)

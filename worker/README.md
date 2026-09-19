@@ -77,7 +77,7 @@ docker compose up -d
 
 ```bash
 pip install -r requirements.txt
-python -m worker.src.main
+python -m worker.irides_worker.main
 ```
 
 ---

@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from api.src.services.scan_service import ScanService
+from api.irides_api.services.scan_service import ScanService
 
 
 def test_enqueue_resolves_unique_configuration_from_instance():

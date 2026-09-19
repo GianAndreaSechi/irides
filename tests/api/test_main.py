@@ -76,18 +76,18 @@ def client():
     mock_metadata_service.update_table.return_value = _FAKE_TABLE_META
 
     with (
-        patch("api.src.main.CacheManager"),
-        patch("api.src.main.ConnectorManager"),
-        patch("api.src.main.ConfigService", return_value=mock_config_service),
-        patch("api.src.main.InstanceService", return_value=mock_instance_service),
-        patch("api.src.main.SchemaService", return_value=mock_schema_service),
-        patch("api.src.main.TableService", return_value=mock_table_service),
-        patch("api.src.main.DescribeTableService", return_value=mock_describe_service),
-        patch("api.src.main.JobStore"),
-        patch("api.src.main.ScanService", return_value=mock_scan_service),
-        patch("api.src.routers.metadata_router._metadata_service", mock_metadata_service),
+        patch("api.irides_api.main.CacheManager"),
+        patch("api.irides_api.main.ConnectorManager"),
+        patch("api.irides_api.main.ConfigService", return_value=mock_config_service),
+        patch("api.irides_api.main.InstanceService", return_value=mock_instance_service),
+        patch("api.irides_api.main.SchemaService", return_value=mock_schema_service),
+        patch("api.irides_api.main.TableService", return_value=mock_table_service),
+        patch("api.irides_api.main.DescribeTableService", return_value=mock_describe_service),
+        patch("api.irides_api.main.JobStore"),
+        patch("api.irides_api.main.ScanService", return_value=mock_scan_service),
+        patch("api.irides_api.routers.metadata_router._metadata_service", mock_metadata_service),
     ):
-        from api.src.main import app
+        from api.irides_api.main import app
         yield TestClient(app)
 
 
@@ -119,7 +119,7 @@ class TestConnectEndpoint:
         assert "Successfully connected" in resp.json()["data"]["message"]
 
     def test_unknown_config_returns_400(self, client):
-        with patch("api.src.main.config_service") as mock_cs:
+        with patch("api.irides_api.main.config_service") as mock_cs:
             mock_cs.test_connection.side_effect = ValueError("not found")
             resp = client.post("/api/v1/connect", json={"config_name": "unknown"})
         assert resp.status_code == 400
@@ -224,7 +224,7 @@ class TestScanEndpoints:
         assert resp.json()["data"]["job_id"] == "test-job-id"
 
     def test_get_scan_job_not_found(self, client):
-        with patch("api.src.main.scan_service") as mock_ss:
+        with patch("api.irides_api.main.scan_service") as mock_ss:
             mock_ss.get_job.return_value = None
             resp = client.get("/api/v1/scan/nonexistent")
         assert resp.status_code == 404
@@ -259,7 +259,7 @@ class TestMetadataEndpoints:
         assert "mydb" in data["items"]
 
     def test_list_databases_returns_404_when_empty(self, client):
-        import api.src.routers.metadata_router as meta_router
+        import api.irides_api.routers.metadata_router as meta_router
         with patch.object(meta_router, "_metadata_service") as mock:
             mock.list_databases.return_value = _EMPTY_PAGE
             resp = client.get("/api/v1/metadata/unknown_host")
@@ -272,7 +272,7 @@ class TestMetadataEndpoints:
         assert "users" in data["items"]
 
     def test_list_tables_returns_404_when_empty(self, client):
-        import api.src.routers.metadata_router as meta_router
+        import api.irides_api.routers.metadata_router as meta_router
         with patch.object(meta_router, "_metadata_service") as mock:
             mock.list_tables.return_value = _EMPTY_PAGE
             resp = client.get("/api/v1/metadata/db.host.local/nonexistent_db")
@@ -286,7 +286,7 @@ class TestMetadataEndpoints:
         assert data["instance_name"] == "db.host.local"
 
     def test_get_table_detail_returns_404(self, client):
-        import api.src.routers.metadata_router as meta_router
+        import api.irides_api.routers.metadata_router as meta_router
         with patch.object(meta_router, "_metadata_service") as mock:
             mock.get_table.return_value = None
             resp = client.get("/api/v1/metadata/db.host.local/mydb/nonexistent")
@@ -308,7 +308,7 @@ class TestMetadataEndpoints:
         assert resp.status_code == 422
 
     def test_patch_table_returns_404_when_not_found(self, client):
-        import api.src.routers.metadata_router as meta_router
+        import api.irides_api.routers.metadata_router as meta_router
         with patch.object(meta_router, "_metadata_service") as mock:
             mock.update_table.return_value = None
             resp = client.patch(
@@ -320,7 +320,7 @@ class TestMetadataEndpoints:
 
 class TestUIEndpoint:
     def test_ui_returns_html(self, client):
-        with patch("api.src.main._UI_FILE") as mock_file:
+        with patch("api.irides_api.main._UI_FILE") as mock_file:
             mock_file.read_text.return_value = "<html><body>UI</body></html>"
             resp = client.get("/ui")
         assert resp.status_code == 200

@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from typing import Any, Dict
 
-from api.src.services.metadata_service import MetadataService
-from api.src.services.response_service import api_response
+from api.irides_api.services.metadata_service import MetadataService
+from api.irides_api.services.response_service import api_response
 from core.db_connector.storage import get_metadata_store
 
 router = APIRouter(prefix="/metadata", tags=["metadata"])

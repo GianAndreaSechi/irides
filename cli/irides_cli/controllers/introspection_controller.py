@@ -3,13 +3,13 @@
 import argparse
 from typing import Any
 
-from src.dto.requests import DescribeRequest, ScopeRequest, TablesRequest
-from src.services.introspection_service import IntrospectionService
+from irides_cli.dto.requests import DescribeRequest, ScopeRequest, TablesRequest
+from irides_cli.services.introspection_service import IntrospectionService
 
 
 class IntrospectionController:
-    def __init__(self, service: IntrospectionService | None = None) -> None:
-        self.service = service or IntrospectionService()
+    def __init__(self, service: IntrospectionService | None = None, config_file: str | None = None) -> None:
+        self.service = service or IntrospectionService(config_file=config_file)
 
     def execute(self, args: argparse.Namespace) -> Any:
         if args.command == "configurations": return self.service.configurations()

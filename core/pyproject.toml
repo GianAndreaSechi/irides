@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irides-core"
+version = "0.1.0"
+description = "A Python library for extracting structured database metadata to provide reliable context to AI systems and data-driven applications."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Gian Andrea Sechi", email = "me@gianandreasechi.com"}
+]
+keywords = ["database", "introspection", "metadata", "irides", "schema", "redis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "redis>=4.0",
+    "loguru>=0.7.0",
+    "python-dotenv>=1.0.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+postgres = [
+    "psycopg2-binary>=2.9.0",
+]
+mysql = [
+    "mysql-connector-python>=8.0.0",
+]
+mongo = [
+    "pymongo>=4.0.0",
+]
+duckdb = [
+    "duckdb>=0.9.0",
+]
+aws = [
+    "boto3>=1.26.0",
+]
+trino = [
+    "trino>=0.320.0",
+]
+ai = [
+    "litellm>=1.0.0",
+]
+all = [
+    "psycopg2-binary>=2.9.0",
+    "mysql-connector-python>=8.0.0",
+    "pymongo>=4.0.0",
+    "duckdb>=0.9.0",
+    "boto3>=1.26.0",
+    "trino>=0.320.0",
+    "litellm>=1.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.20.0",
+]
+
+[project.urls]
+"Source Code" = "https://github.com/GianAndreaSechi/irides/core"
+"Homepage" = "https://www.gianandreasechi.com"

@@ -140,7 +140,7 @@ docker compose up -d
 
 ```bash
 pip install -r requirements.txt
-uvicorn api.src.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn api.irides_api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 The interactive docs are at `http://localhost:8000/docs` and the UI at `http://localhost:8000/ui`.

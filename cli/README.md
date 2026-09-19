@@ -6,11 +6,11 @@ Command-line interface for database introspection, built only on the `core` pack
 
 The CLI is organized by responsibility:
 
-- `src/presentation/`: command definitions and `argparse` parsing;
-- `src/controllers/`: maps command-line arguments to use cases;
-- `src/dto/`: immutable, typed request DTOs;
-- `src/services/`: live introspection and metadata operations using only `core`;
-- `src/main.py`: composition root, JSON serialization, and process-level error handling.
+- `irides_cli/presentation/`: command definitions and `argparse` parsing;
+- `irides_cli/controllers/`: maps command-line arguments to use cases;
+- `irides_cli/dto/`: immutable, typed request DTOs;
+- `irides_cli/services/`: live introspection and metadata operations using only `core`;
+- `irides_cli/main.py`: composition root, JSON serialization, and process-level error handling.
 
 ## Local installation
 
@@ -18,28 +18,74 @@ The CLI is organized by responsibility:
 pip install -e ./core -e ./cli
 ```
 
-Target configuration is shared with the rest of the project: use `DB_TARGETS` and the corresponding `DB_TARGET_<NAME>_*` variables.
+## Quickstart & Configuration
 
-Create a local configuration before running the CLI:
+Irides supports two ways to configure database targets:
 
+### Option 1: Declarative Config File (`irides.yaml`) — Recommended
+Generate a template configuration with:
 ```bash
-cp cli/.env.example cli/.env
+irides init
+```
+This creates an `irides.yaml` file in the current directory:
+```yaml
+targets:
+  my_postgres:
+    type: postgres
+    host: localhost
+    port: 5432
+    user: postgres
+    password: "${PG_PASSWORD:-secret}"
+    database: my_database
+
+  local_sqlite:
+    type: sqlite
+    database: ./app.db
+```
+You can pass a custom config file anytime using `-c` / `--config-file`:
+```bash
+irides -c /path/to/my_config.yaml configurations
+```
+
+### Option 2: Environment Variables (`.env`)
+You can initialize an environment template with:
+```bash
+irides init --format env
+```
+Or specify an explicit `.env` file via `-e` / `--env-file`:
+```bash
+irides -e /path/to/.env configurations
 ```
 
 ## Commands
 
 ```bash
+# Initialize template configuration
+irides init
+
+# List configured database targets
 irides configurations
-irides connect sales_mysql
-irides instances --config sales_mysql
-irides schemas --config sales_mysql --instance db1.company.com
-irides tables --config sales_mysql --instance db1.company.com --schema production --limit 50
-irides describe --config sales_mysql --instance db1.company.com --schema production --table orders
-irides describe --config sales_mysql --instance db1.company.com --schema production --table orders --generate-ai-docs
-irides describe --config sales_mysql --instance db1.company.com --schema production --table orders --no-export-okf
+
+# Test database connection
+irides connect my_postgres
+
+# List database instances
+irides instances --target my_postgres
+
+# List schemas in a database
+irides schemas --target my_postgres --instance localhost
+
+# List tables (supports --limit and --offset)
+irides tables --target my_postgres --instance localhost --schema public --limit 50
+
+# Introspect table schema
+irides describe --target my_postgres --instance localhost --schema public --table orders
+irides describe --target my_postgres --instance localhost --schema public --table orders --generate-ai-docs
+irides describe --target my_postgres --instance localhost --schema public --table orders --no-export-okf
 ```
 
-Omitting `--config`, `--instance`, `--schema`, or `--table` expands the scope, just like the corresponding API endpoints. Results are always written as JSON to stdout; errors are written to stderr. Add `--no-cache` to introspection commands to bypass Redis.
+> **Note**: `--target` and `--config` are interchangeable aliases.
+Omitting `--target`, `--instance`, `--schema`, or `--table` expands the scope, just like the corresponding API endpoints. Results are always written as JSON to stdout; errors are written to stderr. Add `--no-cache` to introspection commands to bypass Redis.
 
 `describe` saves canonical JSON metadata and generates both **Markdown** and **Open Knowledge Format (OKF v0.2)** exports by default.
 

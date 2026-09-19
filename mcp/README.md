@@ -84,7 +84,7 @@ docker compose up -d
 
 ```bash
 pip install -r requirements.txt
-python -m src.server
+python -m irides_mcp.server
 ```
 
 ---

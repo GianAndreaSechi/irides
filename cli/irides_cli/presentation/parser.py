@@ -4,18 +4,29 @@ import argparse
 
 
 def _add_scope_arguments(parser: argparse.ArgumentParser, *, table: bool = False) -> None:
-    parser.add_argument("--config", dest="config_name", help="Configured database target")
+    parser.add_argument("-t", "--target", "--config", dest="config_name", help="Configured database target name")
     parser.add_argument("--instance", dest="instance_name", help="Database instance")
     if table: parser.add_argument("--schema", dest="schema_name", help="Schema/database name")
     parser.add_argument("--no-cache", action="store_true", help="Bypass the Redis cache")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="irides", description="Inspect databases through Iride core, without the API service.")
+    parser = argparse.ArgumentParser(prog="irides", description="Inspect databases through Irides core, without the API service.")
+    parser.add_argument("-e", "--env-file", dest="env_file", help="Path to .env file to load variables from")
+    parser.add_argument("-c", "--config-file", dest="config_file", help="Path to YAML/JSON configuration file (e.g. irides.yaml)")
+
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_cmd = subparsers.add_parser("init", help="Initialize a template configuration file (irides.yaml or .env)")
+    init_cmd.add_argument("-f", "--format", choices=["yaml", "env"], default="yaml", help="Config format: yaml (default) or env")
+    init_cmd.add_argument("--force", action="store_true", help="Overwrite existing configuration file")
+
     subparsers.add_parser("configurations", help="List active configurations")
-    connect = subparsers.add_parser("connect", help="Test a configuration"); connect.add_argument("config_name")
-    instances = subparsers.add_parser("instances", help="List instances"); instances.add_argument("--config", dest="config_name"); instances.add_argument("--no-cache", action="store_true")
+    connect = subparsers.add_parser("connect", help="Test a configuration")
+    connect.add_argument("config_name", metavar="TARGET", help="Database target name to connect to")
+    instances = subparsers.add_parser("instances", help="List instances")
+    instances.add_argument("-t", "--target", "--config", dest="config_name", help="Configured database target name")
+    instances.add_argument("--no-cache", action="store_true")
     schemas = subparsers.add_parser("schemas", help="List schemas"); _add_scope_arguments(schemas)
     tables = subparsers.add_parser("tables", help="List tables"); _add_scope_arguments(tables, table=True); tables.add_argument("--limit", type=int); tables.add_argument("--offset", type=int)
     describe = subparsers.add_parser("describe", help="Describe tables and optionally save metadata")

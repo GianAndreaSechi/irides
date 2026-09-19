@@ -17,5 +17,5 @@ RUN pip install --no-cache-dir -r /app/mcp/requirements.txt
 # Expose the port that FastAPI runs on
 EXPOSE 8000
 
-# Command to run the fastmcp application using the src package
-CMD ["python", "-m", "src.server"]
+# Command to run the fastmcp application using the irides_mcp package
+CMD ["python", "-m", "irides_mcp.server"]
