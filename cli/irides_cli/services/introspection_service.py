@@ -17,7 +17,7 @@ from irides_cli.dto.requests import DescribeRequest, ScopeRequest, TablesRequest
 class IntrospectionService:
     """Runs live introspection without any dependency on API-layer code."""
 
-    def __init__(self, config_service: ConfigService | None = None) -> None:
+    def __init__(self, config_service: ConfigService | None = None, config_file: str | None = None) -> None:
         if config_service is None:
             cache = CacheManager(
                 host=os.getenv("REDIS_HOST", "localhost"),
@@ -27,7 +27,7 @@ class IntrospectionService:
                 socket_connect_timeout=float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS", "2")),
                 socket_timeout=float(os.getenv("REDIS_CACHE_SOCKET_TIMEOUT_SECONDS", "2")),
             )
-            config_service = ConfigService(ConnectorManager(cache))
+            config_service = ConfigService(ConnectorManager(cache), config_file=config_file)
         self.config_service = config_service
 
     def configurations(self) -> List[str]:

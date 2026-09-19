@@ -3,7 +3,9 @@
 import json
 import sys
 from typing import Any, List, Optional
+from dotenv import load_dotenv
 
+from irides_cli.controllers.init_controller import InitController
 from irides_cli.controllers.introspection_controller import IntrospectionController
 from irides_cli.controllers.metadata_controller import MetadataController
 from irides_cli.presentation.parser import build_parser
@@ -20,11 +22,29 @@ def print_json(data: Any) -> None:
 
 
 def run(args: Any) -> Any:
-    return MetadataController().execute(args) if args.command == "metadata" else IntrospectionController().execute(args)
+    if args.command == "init":
+        return InitController().execute(fmt=args.format, force=args.force)
+    if args.command == "metadata":
+        return MetadataController().execute(args)
+
+    config_file = getattr(args, "config_file", None)
+    controller = IntrospectionController(config_file=config_file)
+    result = controller.execute(args)
+    if args.command == "configurations" and isinstance(result, list) and len(result) == 0:
+        print(
+            "irides: notice: no database targets configured. Run 'irides init' to generate a configuration template or check your .env.",
+            file=sys.stderr,
+        )
+    return result
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+
+    env_file = getattr(args, "env_file", None)
+    if env_file:
+        load_dotenv(dotenv_path=env_file, override=True)
+
     try:
         result = run(args)
         if result is None: raise ValueError("No metadata found.")

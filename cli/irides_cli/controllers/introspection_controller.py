@@ -8,8 +8,8 @@ from irides_cli.services.introspection_service import IntrospectionService
 
 
 class IntrospectionController:
-    def __init__(self, service: IntrospectionService | None = None) -> None:
-        self.service = service or IntrospectionService()
+    def __init__(self, service: IntrospectionService | None = None, config_file: str | None = None) -> None:
+        self.service = service or IntrospectionService(config_file=config_file)
 
     def execute(self, args: argparse.Namespace) -> Any:
         if args.command == "configurations": return self.service.configurations()
