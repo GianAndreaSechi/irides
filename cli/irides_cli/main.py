@@ -2,6 +2,7 @@
 
 import json
 import sys
+from pathlib import Path
 from typing import Any, List, Optional
 from dotenv import load_dotenv
 
@@ -40,6 +41,8 @@ def run(args: Any) -> Any:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+
+    load_dotenv(dotenv_path=Path.cwd() / ".env")
 
     env_file = getattr(args, "env_file", None)
     if env_file:
