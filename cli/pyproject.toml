@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "irides-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "A command-line interface for discovering, inspecting, and managing structured database context for AI systems."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Database",
 ]
 dependencies = [
-    "irides-core>=0.1.1",
+    "irides-core>=0.1.2",
 ]
 
 [project.scripts]
