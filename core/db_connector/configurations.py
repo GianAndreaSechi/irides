@@ -13,7 +13,11 @@ import yaml
 # An explicit DB_CONFIG_FILE is the authoritative source for database settings.
 # This matters in containers where an auxiliary env file may define optional
 # connector variables as empty strings.
-load_dotenv(dotenv_path=os.getenv("DB_CONFIG_FILE") or None, override=bool(os.getenv("DB_CONFIG_FILE")))
+_db_config_file = os.getenv("DB_CONFIG_FILE")
+load_dotenv(
+    dotenv_path=_db_config_file or (Path.cwd() / ".env"),
+    override=bool(_db_config_file),
+)
 
 CONFIG_SEARCH_FILENAMES = ["irides.yaml", "irides.yml", "irides.json"]
 
