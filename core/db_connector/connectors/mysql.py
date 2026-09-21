@@ -261,6 +261,8 @@ class MySQLConnector(BaseConnector):
                 }
             if row['COLUMN_NAME'] is not None:
                 indexes_map[index_name]['column_names'].append(row['COLUMN_NAME'])
+            else:
+                logger.warning(f"Index '{index_name}' on table '{schema_name}.{table_name}' has no column name in information_schema.STATISTICS.")
 
         
         return [Index(**idx) for idx in indexes_map.values()]
