@@ -259,6 +259,8 @@ class MySQLConnector(BaseConnector):
                     'is_primary': (index_name == 'PRIMARY'),
                     'type': None # information_schema.STATISTICS doesn't directly give index type (BTREE/HASH)
                 }
-            indexes_map[index_name]['column_names'].append(row['COLUMN_NAME'])
+            if row['COLUMN_NAME'] is not None:
+                indexes_map[index_name]['column_names'].append(row['COLUMN_NAME'])
+
         
         return [Index(**idx) for idx in indexes_map.values()]
