@@ -18,10 +18,13 @@ from loguru import logger
 
 from core.db_connector.cache_manager import CacheManager
 from core.db_connector.config_service import ConfigService
+from core.db_connector.configurations import ensure_dotenv_loaded
 from core.db_connector.job_store import JobStore
 from core.db_connector.manager import ConnectorManager
 from core.db_connector.exporting import ExportOptions
 from worker.irides_worker.services.scan_executor_service import ScanExecutorService
+
+ensure_dotenv_loaded()
 
 
 # ---------------------------------------------------------------------------
@@ -116,34 +119,40 @@ class ScanWorker:
             self.job_store.ack(message_id)
             return
 
-        config_name = data.get("config_name") or None
-        instance_name = data.get("instance_name") or None
-        schema_name = data.get("schema_name") or None
-        no_cache = data.get("no_cache") == "true"
-        generate_ai_docs = data.get("generate_ai_docs") == "true"
-        save_metadata = data.get("save_metadata", "true") == "true"
-        only_if_changed = data.get("only_if_changed") == "true"
-        if "export_formats" in data:
-            export_options = ExportOptions(
-                formats=json.loads(data["export_formats"]),
-                preformat=data.get("export_preformat", "true") == "true",
-            )
-        elif "save_markdown" in data:
-            export_options = ExportOptions(
-                formats=["markdown"] if data["save_markdown"] == "true" else []
-            )
-        else:
-            export_options = ExportOptions()
-
-        logger.info(
-            f"ScanWorker: processing job {job_id} "
-            f"[config={config_name}, instance={instance_name}, schema={schema_name}, "
-            f"no_cache={no_cache}, generate_ai_docs={generate_ai_docs}, save_metadata={save_metadata}, "
-            f"only_if_changed={only_if_changed}, export_options={export_options.model_dump(mode='json')}]"
-        )
-        self.job_store.mark_running(job_id)
-
         try:
+            config_name = data.get("config_name") or None
+            instance_name = data.get("instance_name") or None
+            schema_name = data.get("schema_name") or None
+            no_cache = data.get("no_cache") == "true"
+            generate_ai_docs = data.get("generate_ai_docs") == "true"
+            save_metadata = data.get("save_metadata", "true") == "true"
+            only_if_changed = data.get("only_if_changed") == "true"
+            if "export_formats" in data:
+                export_formats_raw = data["export_formats"]
+                parsed_formats = (
+                    json.loads(export_formats_raw)
+                    if isinstance(export_formats_raw, str)
+                    else export_formats_raw
+                )
+                export_options = ExportOptions(
+                    formats=parsed_formats,
+                    preformat=data.get("export_preformat", "true") == "true",
+                )
+            elif "save_markdown" in data:
+                export_options = ExportOptions(
+                    formats=["markdown"] if data["save_markdown"] == "true" else []
+                )
+            else:
+                export_options = ExportOptions()
+
+            logger.info(
+                f"ScanWorker: processing job {job_id} "
+                f"[config={config_name}, instance={instance_name}, schema={schema_name}, "
+                f"no_cache={no_cache}, generate_ai_docs={generate_ai_docs}, save_metadata={save_metadata}, "
+                f"only_if_changed={only_if_changed}, export_options={export_options.model_dump(mode='json')}]"
+            )
+            self.job_store.mark_running(job_id)
+
             result = self.executor.execute(
                 job_id,
                 config_name,
@@ -154,6 +163,8 @@ class ScanWorker:
                 save_metadata=save_metadata,
                 only_if_changed=only_if_changed,
                 export_options=export_options,
+                consumer_name=self.settings.consumer_name,
+                message_id=message_id,
             )
             if result.errors:
                 error_text = "; ".join(result.errors)
@@ -171,10 +182,15 @@ class ScanWorker:
                 logger.info(f"ScanWorker: job {job_id} completed — {result.count} tables described")
         except Exception as e:
             logger.exception(f"ScanWorker: job {job_id} failed: {e}")
-            self.job_store.mark_failed(job_id, str(e))
-
-
-        self.job_store.ack(message_id)
+            try:
+                self.job_store.mark_failed(job_id, str(e))
+            except Exception as mark_err:
+                logger.error(f"ScanWorker: could not mark job {job_id} failed: {mark_err}")
+        finally:
+            try:
+                self.job_store.ack(message_id)
+            except Exception as ack_err:
+                logger.error(f"ScanWorker: could not ack message {message_id}: {ack_err}")
 
 
 # ---------------------------------------------------------------------------

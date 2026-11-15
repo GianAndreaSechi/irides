@@ -1,13 +1,16 @@
 from dataclasses import dataclass, field
+import os
+import time
 from typing import Optional
 from loguru import logger
 
+from core.db_connector.catalog import build_schema_description
 from core.db_connector.config_service import ConfigService
 from core.db_connector.job_store import JobStore
 from core.db_connector.models import Schema
 from core.db_connector.ai_service import AIDocumentationService
-from core.db_connector.storage import get_metadata_store
-from core.db_connector.exporting import ExportOptions
+from core.db_connector.storage import FileMetadataStore, get_metadata_store
+from core.db_connector.exporting import ExportFormat, ExportOptions
 
 
 @dataclass
@@ -32,6 +35,8 @@ class ScanExecutorService:
         save_metadata: bool = True,
         only_if_changed: bool = False,
         export_options: Optional[ExportOptions] = None,
+        consumer_name: Optional[str] = None,
+        message_id: Optional[str] = None,
     ) -> ScanExecutionResult:
         """
         Scans tables according to the given scope, stores each TableDescription
@@ -59,6 +64,8 @@ class ScanExecutorService:
         export_options = export_options or ExportOptions()
         metadata_store = get_metadata_store() if save_metadata or export_options.formats else None
         ai_service = AIDocumentationService() if generate_ai_docs else None
+        heartbeat_interval = float(os.getenv("WORKER_HEARTBEAT_INTERVAL_SECONDS", "30"))
+        last_heartbeat = 0.0
         logger.info(
             "ScanExecutorService [{}]: AI documentation generation is {}.",
             job_id,
@@ -97,34 +104,45 @@ class ScanExecutorService:
                                     table_name=tbl.name,
                                     no_cache=no_cache,
                                 )
-                                desc_dict = desc.model_dump(
-                                    exclude={"ai_documentation", "ai_generation_status", "ai_generation_error"}
-                                )
+                                desc = desc.model_copy(update={"config_name": c_name})
+                                desc_dict = build_schema_description(desc)
                                 ai_doc = None
                                 ai_status = None
                                 ai_error = None
                                 if ai_service:
-                                    logger.info(
-                                        "ScanExecutorService [{}]: Generating AI documentation for {}/{}/{}.",
-                                        job_id,
-                                        c_name,
-                                        sch.name,
-                                        tbl.name,
+                                    existing_doc = (
+                                        metadata_store.get_table_metadata(c_name, host, sch.name, tbl.name)
+                                        if (only_if_changed and metadata_store is not None)
+                                        else None
                                     )
-                                    ai_doc = ai_service.generate_table_documentation(desc_dict)
-                                    ai_status = "generated" if ai_doc else "failed"
-                                    ai_error = None if ai_doc else ai_service.last_error
+                                    if (
+                                        only_if_changed
+                                        and isinstance(existing_doc, dict)
+                                        and existing_doc.get("schema_description") == desc_dict
+                                        and existing_doc.get("ai_documentation") is not None
+                                    ):
+                                        ai_doc = existing_doc.get("ai_documentation")
+                                        ai_status = "reused"
+                                    else:
+                                        logger.info(
+                                            "ScanExecutorService [{}]: Generating AI documentation for {}/{}/{}.",
+                                            job_id,
+                                            c_name,
+                                            sch.name,
+                                            tbl.name,
+                                        )
+                                        ai_doc = ai_service.generate_table_documentation(desc_dict)
+                                        ai_status = "generated" if ai_doc else "failed"
+                                        ai_error = None if ai_doc else ai_service.last_error
 
-                                result_dict = dict(desc_dict)
+                                result_dict = {"config_name": c_name, **desc_dict}
                                 if ai_service:
                                     result_dict["ai_documentation"] = ai_doc
                                     result_dict["ai_generation_status"] = ai_status
                                     result_dict["ai_generation_error"] = ai_error
 
-                                self.job_store.append_result(job_id, result_dict)
-
                                 if metadata_store:
-                                    metadata_store.save_table_metadata(
+                                    save_kwargs = dict(
                                         config_name=c_name,
                                         instance_name=host,
                                         schema_name=sch.name,
@@ -135,6 +153,20 @@ class ScanExecutorService:
                                         export_options=export_options,
                                         save_metadata=save_metadata,
                                     )
+                                    if isinstance(metadata_store, FileMetadataStore):
+                                        save_kwargs["rebuild_index"] = False
+                                    metadata_store.save_table_metadata(**save_kwargs)
+
+                                self.job_store.append_result(job_id, result_dict)
+                                if hasattr(self.job_store, "heartbeat"):
+                                    now_mono = time.monotonic()
+                                    if last_heartbeat == 0.0 or (now_mono - last_heartbeat) >= heartbeat_interval:
+                                        self.job_store.heartbeat(
+                                            job_id,
+                                            consumer_name=consumer_name,
+                                            message_id=message_id,
+                                        )
+                                        last_heartbeat = now_mono
 
                                 result.count += 1
                             except Exception as e:
@@ -150,5 +182,15 @@ class ScanExecutorService:
                 logger.warning(
                     f"ScanExecutorService [{job_id}]: error processing config {c_name}: {e}"
                 )
+
+        if (
+            isinstance(metadata_store, FileMetadataStore)
+            and ExportFormat.OKF in export_options.formats
+            and result.count > 0
+        ):
+            try:
+                metadata_store.artifact_store.rebuild_okf_index()
+            except Exception as e:
+                logger.warning(f"ScanExecutorService [{job_id}]: failed to rebuild OKF index: {e}")
 
         return result
