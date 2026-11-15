@@ -210,6 +210,8 @@ marimo/_lsp/
 __marimo__/
 
 storage
+storage/
+examples/sqlite_demo/demo.sqlite
 
 # macOS
 .DS_Store

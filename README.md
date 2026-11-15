@@ -1,6 +1,123 @@
 # irides
 
-A unified, asynchronous database introspection layer designed to help LLMs and applications extract, summarize, and understand schemas across heterogeneous data stores.
+Portable, Git-ready database introspection and documentation for developers, data teams, and AI agents.
+
+`irides` inspects SQL, NoSQL, and analytical databases, normalizes their structure into canonical Pydantic models, preserves human curation (`owner`, `notes`, `classification`, `tags`) across schema refreshes, and exports deterministic **Markdown** and **Open Knowledge Format (OKF v0.2)** catalogs.
+
+---
+
+## Quickstart in 60 Seconds (SQLite, No Docker or Redis Required)
+
+You can use `irides` locally from the CLI or Python without starting Redis, Docker, or the web API.
+
+### 1. Install Core + CLI
+
+```bash
+pip install -e ./core -e ./cli
+```
+
+*(Optional extras for external engines: `pip install -e "./core[postgres,mysql,duckdb,mongo,aws,trino,ai]"`)*
+
+### 2. Create and Introspect a Local SQLite Database
+
+```bash
+python examples/sqlite_demo/setup_demo.py
+irides -c examples/sqlite_demo/irides.yaml describe --target demo_sqlite
+```
+
+This generates:
+- Canonical JSON metadata in `storage/metadata/demo_sqlite/...`
+- Standalone Markdown files in `storage/exports/markdown/demo_sqlite/...`
+- An OKF v0.2 bundle in `storage/exports/okf/catalog/` with an `index.md` catalog index.
+
+### 3. Add Human Governance & Notes (Preserved Across Re-Scans)
+
+```bash
+irides metadata update ./demo.sqlite main orders \
+  '{"owner":"checkout-team","classification":"confidential","tags":["orders","core"],"notes":"Primary order ledger table."}' \
+  --target demo_sqlite
+```
+
+Re-running `irides -c examples/sqlite_demo/irides.yaml describe --target demo_sqlite --only-if-changed` keeps your `owner`, `classification`, `tags`, and `notes` intact and updates the Markdown/OKF exports:
+
+```markdown
+# main.orders
+
+## Source
+
+- Configuration: `demo_sqlite`
+- Instance: `./demo.sqlite`
+- Schema: `main`
+- Table: `orders`
+- Metadata updated: `2026-04-20T00:00:00+00:00`
+
+## Governance
+
+- Owner: `checkout-team`
+- Classification: `confidential`
+- Tags: `orders`, `core`
+
+## Notes
+
+Primary order ledger table.
+
+## Columns
+
+| Name | Type | Nullable | Description |
+| --- | --- | --- | --- |
+| id | INTEGER | False |  |
+| customer_id | INTEGER | False |  |
+| order_number | TEXT | False |  |
+| total_cents | INTEGER | False |  |
+| currency | TEXT | False |  |
+| placed_at | TEXT | False |  |
+
+## Keys and Relationships
+
+- Primary key: `id`
+- `customer_id` -> `customers.id`
+
+## Indexes
+
+- `sqlite_autoindex_orders_1`: unique `order_number`
+```
+
+Pass `--no-preformat` to `irides describe` (or `irides metadata export --no-preformat`) to include the `Default` column and non-unique secondary indexes in the exported Markdown/OKF documents.
+
+---
+
+## Python Library Usage (`irides_core`)
+
+Use the high-level `Catalog` facade when embedding Irides in Python scripts, CI pipelines, or custom agents:
+
+```python
+from irides_core import Catalog
+
+catalog = Catalog(config_file="examples/sqlite_demo/irides.yaml")
+
+for inst in catalog.instances("demo_sqlite"):
+    print("Instance:", inst.name)
+
+outcomes = catalog.describe(
+    config_name="demo_sqlite",
+    schema_name="main",
+    table_name="orders",
+    only_if_changed=True,
+)
+for item in outcomes:
+    print(item.table.table_name, [col.name for col in item.table.columns])
+```
+
+---
+
+## Linking Repositories to the Catalog (`database.md`)
+
+Projects can declare which database resources they read or write using a versioned `database.md` frontmatter (or YAML/JSON manifest) and validate it against the Irides Metadata Store:
+
+```bash
+irides manifest validate examples/sqlite_demo/database.md
+irides manifest links examples/sqlite_demo/database.md
+```
 
 ---
 
@@ -11,11 +128,11 @@ When building AI agents or data tools across multiple databases, a primary chall
 `irides` acts as a **context provider layer** that:
 - Introspects diverse SQL, NoSQL, and cloud analytics databases.
 - Normalizes schemas, tables, columns, indexes, and primary/foreign keys into structured Pydantic models.
-- Provides a versioned REST API (`/api/v1`), MCP endpoints, and asynchronous table scanning via **Redis Streams**.
+- Provides a local CLI (`irides`), a Python SDK (`irides_core`), a versioned REST API (`/api/v1`), MCP endpoints, and asynchronous table scanning via **Redis Streams**.
 - Generates multi-format documentation artifacts, including standalone **Markdown** and **Open Knowledge Format (OKF v0.2)** catalog bundles with deterministic essential views.
 - Optionally generates semantic table documentation via **LiteLLM** and stores it separately from raw schema metadata.
 - Optimizes payload size for LLMs using lightweight serialization ([TOON](https://github.com/toon-format/toon)).
-- Persists introspected metadata (with human annotations) in a **Metadata Store** backed by JSON files, S3, or Athena.
+- Persists introspected metadata (with human annotations) in a **Metadata Store** backed by JSON files (with S3/Athena interfaces planned).
 
 ---
 
@@ -60,11 +177,12 @@ The system is split into microservices connected via Docker networks and Redis S
     └──────────────┘   └──────────────────┘   └──────────────┘
 ```
 
-- **`core/`**: Shared Python library providing connector abstractions, models, caching, configuration loaders, multi-format export engines (Markdown & OKF), and Redis `JobStore`.
-- **`infra/`**: Shared Redis container and `irides-net` Docker network.
-- **`api/`**: FastAPI web service exposing the versioned REST API, Metadata API, and Web UI.
+- **`core/`**: Shared Python library (`irides_core` / `core.db_connector`) providing the `Catalog` facade, connector abstractions, models, optional Redis caching, configuration loaders, multi-format export engines (Markdown & OKF), manifest validator, and Redis `JobStore`.
+- **`cli/`**: Command-line interface (`irides`) for local introspection, metadata management, offline export regeneration, and manifest validation.
+- **`infra/`**: Shared Redis container and `multi-db-net` Docker network.
+- **`api/`**: FastAPI web service exposing the versioned REST API, Metadata API, and Web UI (`/ui`).
 - **`worker/`**: Async task consumer executing background scans, writing metadata and generating derived export artifacts.
-- **`mcp/`**: FastMCP server exposing introspection and scan tools directly to AI assistants.
+- **`mcp/`**: FastMCP server exposing introspection, metadata, and scan tools directly to AI assistants.
 
 ---
 
@@ -175,7 +293,7 @@ A browser-based interface is available at `GET /ui`. It connects to the same Fas
 ### Features
 
 - **Browse**: Navigate the instance / database / table hierarchy stored in the Metadata Store.
-- **Search and filter**: Full-text search across table names, owners, tags, and notes.
+- **Filter loaded items**: Client-side filtering across loaded instance, database, and table lists.
 - **Inspect**: View the full metadata JSON for any table with syntax highlighting.
 - **Annotate**: Edit and save custom fields (owner, tags, notes, etc.) directly from the browser via the PATCH Metadata API.
 - **Theme toggle**: Seamless switch between Dark and Light mode with theme preferences persisted in `localStorage`.
@@ -185,19 +303,18 @@ A browser-based interface is available at `GET /ui`. It connects to the same Fas
 
 ---
 
-## Supported Database Connectors
+## Supported Database Connectors & Capabilities Matrix
 
-| Database | Connector Type | Configuration |
-|---|---|---|---|
-| **MySQL / MariaDB** | `mysql` | `DB_TARGETS` |
-| **PostgreSQL** | `postgres` | `DB_TARGETS` |
-| **Amazon Athena** | `athena` | `DB_TARGETS` |
-| **Amazon DynamoDB** | `dynamodb` | `DB_TARGETS` |
-| **MongoDB** | `mongodb` | `DB_TARGETS` |
-| **Trino** | `trino` | `DB_TARGETS` |
-| **Presto** | `presto` | `DB_TARGETS` |
-| **SQLite** | `sqlite` | `DB_TARGETS` |
-| **DuckDB** | `duckdb` | `DB_TARGETS` |
+| Database | Connector Type | Extra | Primary Keys | Foreign Keys | Indexes | Partitions | Notes & Limitations |
+|---|---|---|---|---|---|---|---|
+| **SQLite** | `sqlite` | *(built-in)* | Yes (`PRAGMA table_info`) | Yes (`PRAGMA foreign_key_list`, composite ordinal order) | Yes (`PRAGMA index_list` / `index_info`) | No | Opens existing files in read-only mode (`mode=ro`); schema is `main`. |
+| **PostgreSQL** | `postgres` | `postgres` | Yes (`table_constraints`) | Yes (composite-safe via `position_in_unique_constraint`, cross-schema aware) | Yes (`pg_indexes`) | Yes (`pg_inherits`) | Connects to configured `DATABASE` (default `postgres`). |
+| **MySQL / MariaDB** | `mysql` | `mysql` | Yes (`KEY_COLUMN_USAGE`) | Yes (`KEY_COLUMN_USAGE`) | Yes (`STATISTICS`) | Yes (`PARTITIONS`) | Supports single `HOST` or multi-host configurations. |
+| **DuckDB** | `duckdb` | `duckdb` | Yes (`duckdb_constraints`) | Yes (`duckdb_constraints`, composite positional pairing) | Yes (`duckdb_indexes`) | No | File databases opened with `read_only=True`; `:memory:` opened read-write. |
+| **MongoDB** | `mongodb` | `mongo` | `_id` inferred | No | Yes (`index_information`) | No | Schema inferred by sampling up to 100 documents per collection. |
+| **Amazon DynamoDB** | `dynamodb` | `aws` | Yes (`KeySchema` HASH/RANGE) | No | Yes (`GlobalSecondaryIndexes` & `LocalSecondaryIndexes` preserved in exports) | No | Only declared key attributes are returned by `DescribeTable`; GSI/LSI attributes are nullable. |
+| **Amazon Athena** | `athena` | `aws` | No | No | No | Yes (`PartitionKeys` via Glue) | Uses AWS Glue Data Catalog (`get_databases` / `get_tables`). |
+| **Trino / Presto** | `trino` / `presto` | `trino` | Best-effort | No | No | No | Instances represent catalogs (`SHOW CATALOGS`); column metadata via `DESCRIBE`. |
 
 ---
 
@@ -386,33 +503,42 @@ Once the API service is running, the Web UI is available at `http://localhost:<p
 
 ---
 
+## Security & Deployment Guidelines
+
+- **Database Least Privilege**: Always configure `irides` targets with read-only database credentials restricted to schema/catalog metadata.
+- **API Authentication**: Set `IRIDES_API_KEY` on the FastAPI service (and MCP client) to require an `X-API-Key` header (or `Authorization: Bearer <key>`) on all `/api/v1` endpoints. The Web UI (`/ui`) includes a built-in API Key selector stored in `localStorage` (`irides_api_key`) and automatically prompts for the key when the server returns HTTP 401.
+- **Untrusted Metadata & LLMs**: When `generate_ai_docs=true` is enabled, table/column names and database comments are sent to the configured `LITELLM_MODEL`. Database comments are wrapped as untrusted data in the prompt, and only validated `summary` and `column_descriptions` fields are accepted.
+
+---
+
 ## Python Core Usage Example
 
 ```python
-from core.db_connector.cache_manager import CacheManager
-from core.db_connector.manager import ConnectorManager
-from core.db_connector.config_service import ConfigService
+from irides_core import Catalog
+from irides_core.exporting import ExportOptions
 
-# 1. Initialize Redis Cache & Connector Manager
-cache = CacheManager(host="localhost", port=6379, project_prefix="irides")
-manager = ConnectorManager(cache_manager=cache)
+# 1. Initialize Catalog (uses NullCacheManager by default; no Redis required)
+catalog = Catalog(config_file="examples/sqlite_demo/irides.yaml")
 
-# 2. Initialize ConfigService (loads active DBs from environment)
-config_service = ConfigService(connector_manager=manager)
-
-# 3. List active database instances for a named target from DB_TARGETS
-instances = config_service.list_instances(config_name="sales_mysql")
+# 2. List active database instances for a named target
+instances = catalog.instances("demo_sqlite")
 for inst in instances:
     print(f"Found instance: {inst.name}")
 
-# 4. Perform direct table introspection
-connector = config_service._get_connector_for_host("sales_mysql", instances[0].name)
-tables = connector.list_tables(instance_name=instances[0].name, schema_name="public")
-table_desc = connector.describe_table(instance_name=instances[0].name, schema_name="public", table_name=tables[0].name)
-
-for col in table_desc.columns:
+# 3. Describe tables and persist metadata + Markdown/OKF exports
+outcomes = catalog.describe(
+    config_name="demo_sqlite",
+    instance_name=instances[0].name,
+    schema_name="main",
+    save_metadata=True,
+    only_if_changed=True,
+    export_options=ExportOptions(),
+)
+for outcome in outcomes:
+    table_desc = outcome.table
     pk_columns = table_desc.primary_key.column_names if table_desc.primary_key else []
-    print(f"{col.name}: {col.data_type} (PK={col.name in pk_columns})")
+    for col in table_desc.columns:
+        print(f"{col.name}: {col.data_type} (PK={col.name in pk_columns})")
 ```
 
 ---
