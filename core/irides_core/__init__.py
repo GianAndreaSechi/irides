@@ -66,9 +66,9 @@ _SUBMODULES = (
 )
 
 for _submod in _SUBMODULES:
-    sys.modules[f"{__name__}.{_submod}"] = importlib.import_module(
-        f"core.db_connector.{_submod}"
-    )
+    _mod = importlib.import_module(f"core.db_connector.{_submod}")
+    sys.modules[f"{__name__}.{_submod}"] = _mod
+    globals()[_submod] = _mod
 
 __all__ = [
     "AIDocumentationService",

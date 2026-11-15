@@ -128,11 +128,13 @@ def test_cli_nonexistent_config_file_returns_nonzero(capsys):
 
 
 def test_irides_core_submodule_aliasing_identity():
+    import irides_core
     import irides_core.storage as ic_storage
     import core.db_connector.storage as dc_storage
     from irides_core.storage import AmbiguousMetadataError as IcError
     from core.db_connector.storage import AmbiguousMetadataError as DcError
 
+    assert irides_core.storage is dc_storage
     assert ic_storage is dc_storage
     assert IcError is DcError
 
