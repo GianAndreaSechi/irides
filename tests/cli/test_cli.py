@@ -184,3 +184,107 @@ def test_relative_sqlite_config_preserves_instance_name_from_different_cwd(tmp_p
     assert rc_upd == 0
     out_upd, _ = capsys.readouterr()
     assert json.loads(out_upd)["owner"] == "inventory-team"
+
+
+def test_cli_config_env_commands(tmp_path, monkeypatch, capsys):
+    env_file = tmp_path / "irides.env"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LITELLM_MODEL", raising=False)
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+
+    assert cli_main(["-e", str(env_file), "config", "set-env", "LITELLM_MODEL", "gpt-4o-mini"]) == 0
+    capsys.readouterr()
+    assert cli_main(["-e", str(env_file), "config", "set-env", "LITELLM_API_KEY", "sk-demo-123"]) == 0
+    capsys.readouterr()
+
+    assert cli_main(["-e", str(env_file), "config", "list-env"]) == 0
+    out_masked, _ = capsys.readouterr()
+    listed = json.loads(out_masked)
+    assert listed["LITELLM_MODEL"] == "gpt-4o-mini"
+    assert listed["LITELLM_API_KEY"] == "***"
+
+    assert cli_main(["-e", str(env_file), "config", "unset-env", "LITELLM_API_KEY"]) == 0
+    capsys.readouterr()
+    assert cli_main(["-e", str(env_file), "config", "list-env"]) == 0
+    out_after, _ = capsys.readouterr()
+    assert "LITELLM_API_KEY" not in json.loads(out_after)
+
+    assert cli_main(["-e", str(env_file), "config", "set-env", "BAD_CUSTOM", "val"]) == 1
+    capsys.readouterr()
+
+
+def test_cli_config_target_yaml_and_env_roundtrip(tmp_path, monkeypatch, capsys):
+    cfg_file = tmp_path / "irides.yaml"
+    env_file = tmp_path / ".env"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DB_TARGETS", raising=False)
+    monkeypatch.delenv("DB_TARGET_ANALYTICS_PG_PASSWORD", raising=False)
+    monkeypatch.delenv("DB_TARGET_APP_SQLITE_TYPE", raising=False)
+    monkeypatch.delenv("DB_TARGET_APP_SQLITE_DATABASE", raising=False)
+
+    rc_set = cli_main(
+        [
+            "-c",
+            str(cfg_file),
+            "-e",
+            str(env_file),
+            "config",
+            "set-target",
+            "analytics_pg",
+            "--type",
+            "postgres",
+            "--host",
+            "pg.internal",
+            "--port",
+            "5432",
+            "--user",
+            "reader",
+            "--password",
+            "topsecret",
+            "--database",
+            "warehouse",
+        ]
+    )
+    assert rc_set == 0
+    res_set = json.loads(capsys.readouterr()[0])
+    assert res_set["format"] == "yaml"
+    assert "DB_TARGET_ANALYTICS_PG_PASSWORD" in res_set["env_keys"]
+
+    assert cli_main(["-c", str(cfg_file), "config", "show"]) == 0
+    shown_masked = json.loads(capsys.readouterr()[0])
+    assert shown_masked["analytics_pg"]["connection_params"]["password"] == "***"
+
+    assert cli_main(["-c", str(cfg_file), "config", "show", "--show-secrets"]) == 0
+    shown_unmasked = json.loads(capsys.readouterr()[0])
+    assert shown_unmasked["analytics_pg"]["connection_params"]["password"] == "topsecret"
+
+    assert (
+        cli_main(
+            [
+                "-e",
+                str(env_file),
+                "config",
+                "set-target",
+                "app_sqlite",
+                "--type",
+                "sqlite",
+                "--database",
+                "./app.db",
+                "--format",
+                "env",
+            ]
+        )
+        == 0
+    )
+    res_env = json.loads(capsys.readouterr()[0])
+    assert res_env["format"] == "env"
+
+    assert (
+        cli_main(
+            ["-c", str(cfg_file), "-e", str(env_file), "config", "remove-target", "analytics_pg"]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert cli_main(["-e", str(env_file), "config", "remove-target", "app_sqlite", "--format", "env"]) == 0
+    capsys.readouterr()

@@ -320,6 +320,29 @@ A browser-based interface is available at `GET /ui`. It connects to the same Fas
 
 ## DB Configuration & Activation
 
+### Manage Targets & `.env` Variables via CLI
+
+You can configure database targets and runtime environment variables directly from the CLI without manually editing YAML or `.env` files:
+
+```bash
+# Save a PostgreSQL target to irides.yaml with password stored in .env (${DB_TARGET_ANALYTICS_PG_PASSWORD})
+irides config set-target analytics_pg \
+  --type postgres \
+  --host pg-analytics.internal \
+  --user reader \
+  --password secret \
+  --database warehouse
+
+# Or save a target purely as DB_TARGET_* variables in .env
+irides config set-target local_sqlite --type sqlite --database ./demo.sqlite --format env
+
+# Set / inspect / remove supported runtime env vars in .env
+irides config set-env LITELLM_MODEL gpt-4o
+irides config list-env
+irides config show
+irides config remove-target analytics_pg
+```
+
 Configurations are dynamically activated based on `DB_TARGETS`, which supports any number of named targets for any connector.
 
 ### Generic Multi-Target Format
