@@ -69,6 +69,7 @@ def client():
     mock_scan_service.list_jobs.return_value = [_FAKE_JOB]
 
     mock_metadata_service = MagicMock()
+    mock_metadata_service.list_configs.return_value = ["cfg"]
     mock_metadata_service.list_instances.return_value = _FAKE_INSTANCES_PAGE
     mock_metadata_service.list_databases.return_value = _FAKE_DATABASES_PAGE
     mock_metadata_service.list_tables.return_value = _FAKE_TABLES_PAGE
@@ -87,8 +88,14 @@ def client():
         patch("api.irides_api.main.ScanService", return_value=mock_scan_service),
         patch("api.irides_api.routers.metadata_router._metadata_service", mock_metadata_service),
     ):
-        from api.irides_api.main import app
-        yield TestClient(app)
+        import api.irides_api.main as main_mod
+        main_mod.config_service = mock_config_service
+        main_mod.instance_service = mock_instance_service
+        main_mod.schema_service = mock_schema_service
+        main_mod.table_service = mock_table_service
+        main_mod.describe_table_service = mock_describe_service
+        main_mod.scan_service = mock_scan_service
+        yield TestClient(main_mod.app)
 
 
 class TestHealthEndpoints:
@@ -325,3 +332,37 @@ class TestUIEndpoint:
             resp = client.get("/ui")
         assert resp.status_code == 200
         assert "html" in resp.headers["content-type"]
+
+
+class TestMetadataConfigsEndpoint:
+    def test_list_metadata_configs_returns_200(self, client):
+        resp = client.get("/api/v1/metadata/_configs")
+        assert resp.status_code == 200
+        assert resp.json()["data"] == ["cfg"]
+
+
+class TestApiKeyAuthentication:
+    def test_missing_or_invalid_key_returns_401_when_configured(self, client, monkeypatch):
+        monkeypatch.setenv("IRIDES_API_KEY", "super-secret-key")
+        assert client.get("/api/v1/configurations").status_code == 401
+        assert (
+            client.get(
+                "/api/v1/configurations",
+                headers={"X-API-Key": "wrong-key"},
+            ).status_code
+            == 401
+        )
+
+    def test_valid_x_api_key_and_bearer_return_200(self, client, monkeypatch):
+        monkeypatch.setenv("IRIDES_API_KEY", "super-secret-key")
+        resp_header = client.get(
+            "/api/v1/configurations",
+            headers={"X-API-Key": "super-secret-key"},
+        )
+        assert resp_header.status_code == 200
+
+        resp_bearer = client.get(
+            "/api/v1/configurations",
+            headers={"Authorization": "Bearer super-secret-key"},
+        )
+        assert resp_bearer.status_code == 200

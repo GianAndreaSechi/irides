@@ -160,6 +160,53 @@ class TestExecuteAiDocs:
         call_args = job_store.append_result.call_args[0][1]
         assert "ai_documentation" not in call_args
 
+    def test_ai_docs_reused_when_only_if_changed_and_schema_matches(self, executor, job_store):
+        from core.db_connector.catalog import build_schema_description
+
+        expected_schema = build_schema_description(_make_table_desc("mydb", "users"))
+        reused_doc = {"summary": "Cached user summary", "column_descriptions": {"id": "PK"}}
+        mock_store = MagicMock()
+        mock_store.get_table_metadata.return_value = {
+            "schema_description": expected_schema,
+            "ai_documentation": reused_doc,
+        }
+        mock_ai_service = MagicMock()
+
+        with (
+            patch(
+                "worker.irides_worker.services.scan_executor_service.get_metadata_store",
+                return_value=mock_store,
+            ),
+            patch(
+                "worker.irides_worker.services.scan_executor_service.AIDocumentationService",
+                return_value=mock_ai_service,
+            ),
+        ):
+            result = executor.execute(
+                "job-1",
+                "cfg1",
+                "host",
+                "mydb",
+                generate_ai_docs=True,
+                only_if_changed=True,
+                consumer_name="worker-1",
+                message_id="1-0",
+            )
+
+        assert result.count == 1
+        assert result.errors == []
+        mock_store.get_table_metadata.assert_called_once_with("cfg1", "host", "mydb", "users")
+        mock_ai_service.generate_table_documentation.assert_not_called()
+        call_args = job_store.append_result.call_args[0][1]
+        assert call_args["ai_documentation"] == reused_doc
+        assert call_args["ai_generation_status"] == "reused"
+        assert call_args["config_name"] == "cfg1"
+        saved_schema = mock_store.save_table_metadata.call_args.kwargs["schema_description"]
+        assert "config_name" not in saved_schema
+        job_store.heartbeat.assert_called_with(
+            "job-1", consumer_name="worker-1", message_id="1-0"
+        )
+
 
 class TestExecuteMetadata:
     def test_metadata_saved_when_enabled(self, executor):

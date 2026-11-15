@@ -113,3 +113,28 @@ targets:
         os.environ.pop("DB_TARGETS", None)
         os.environ.pop("DB_TARGET_SHARED_DB_TYPE", None)
         os.environ.pop("DB_TARGET_SHARED_DB_HOST", None)
+
+
+def test_explicit_missing_config_file_raises():
+    with pytest.raises(FileNotFoundError, match="Configuration file not found"):
+        load_file_configurations("/nonexistent/path/to/irides.yaml")
+
+
+def test_invalid_yaml_config_file_raises(tmp_path):
+    bad_file = tmp_path / "bad.yaml"
+    bad_file.write_text("targets: [unterminated", encoding="utf-8")
+    with pytest.raises(ValueError, match="Failed to parse configuration file"):
+        load_file_configurations(bad_file)
+
+
+def test_normalized_target_key_collision_raises():
+    os.environ["DB_TARGETS"] = "sales-db,sales_db"
+    os.environ["DB_TARGET_SALES_DB_TYPE"] = "sqlite"
+    os.environ["DB_TARGET_SALES_DB_DATABASE"] = "/tmp/test.db"
+    try:
+        with pytest.raises(ValueError, match="collides with"):
+            get_db_configurations()
+    finally:
+        os.environ.pop("DB_TARGETS", None)
+        os.environ.pop("DB_TARGET_SALES_DB_TYPE", None)
+        os.environ.pop("DB_TARGET_SALES_DB_DATABASE", None)
