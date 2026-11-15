@@ -4,4 +4,4 @@ from .instance import Instance
 from .schema import Schema
 from .table import Table
 from .column import Column
-from .table_details import PrimaryKey, ForeignKey, Index, TableDescription
+from .table_details import PrimaryKey, ForeignKey, Index, Partition, TableDescription
