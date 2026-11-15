@@ -41,3 +41,4 @@ class MetadataUpdateRequest:
     database_name: str
     table_name: str
     payload: Dict[str, Any]
+    config_name: Optional[str] = None

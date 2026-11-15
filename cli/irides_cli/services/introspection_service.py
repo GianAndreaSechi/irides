@@ -4,7 +4,8 @@ import os
 from typing import Any, Dict, Iterable, List
 
 from core.db_connector.ai_service import AIDocumentationService
-from core.db_connector.cache_manager import CacheManager
+from core.db_connector.cache_manager import CacheManager, NullCacheManager
+from core.db_connector.catalog import build_schema_description
 from core.db_connector.config_service import ConfigService
 from core.db_connector.manager import ConnectorManager
 from core.db_connector.models import Schema, Table
@@ -17,16 +18,26 @@ from irides_cli.dto.requests import DescribeRequest, ScopeRequest, TablesRequest
 class IntrospectionService:
     """Runs live introspection without any dependency on API-layer code."""
 
-    def __init__(self, config_service: ConfigService | None = None, config_file: str | None = None) -> None:
+    def __init__(
+        self,
+        config_service: ConfigService | None = None,
+        config_file: str | None = None,
+        no_cache: bool = False,
+    ) -> None:
         if config_service is None:
-            cache = CacheManager(
-                host=os.getenv("REDIS_HOST", "localhost"),
-                port=int(os.getenv("REDIS_PORT", "6379")),
-                db=int(os.getenv("REDIS_DB", "0")),
-                ttl_seconds=int(os.getenv("REDIS_TTL_SECONDS", "86400")),
-                socket_connect_timeout=float(os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS", "2")),
-                socket_timeout=float(os.getenv("REDIS_CACHE_SOCKET_TIMEOUT_SECONDS", "2")),
-            )
+            if no_cache:
+                cache: CacheManager = NullCacheManager()
+            else:
+                cache = CacheManager(
+                    host=os.getenv("REDIS_HOST", "localhost"),
+                    port=int(os.getenv("REDIS_PORT", "6379")),
+                    db=int(os.getenv("REDIS_DB", "0")),
+                    ttl_seconds=int(os.getenv("REDIS_TTL_SECONDS", "86400")),
+                    socket_connect_timeout=float(
+                        os.getenv("REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS", "2")
+                    ),
+                    socket_timeout=float(os.getenv("REDIS_CACHE_SOCKET_TIMEOUT_SECONDS", "2")),
+                )
             config_service = ConfigService(ConnectorManager(cache), config_file=config_file)
         self.config_service = config_service
 
@@ -38,23 +49,57 @@ class IntrospectionService:
 
     def instances(self, request: ScopeRequest) -> List[Any]:
         names = [request.config_name] if request.config_name else self.configurations()
-        return [instance for name in names for instance in self.config_service.list_instances(name, no_cache=request.no_cache)]
+        return [
+            instance
+            for name in names
+            for instance in self.config_service.list_instances(name, no_cache=request.no_cache)
+        ]
 
     def _scope(self, request: ScopeRequest) -> Iterable[tuple[str, str, Any]]:
-        configs = [request.config_name] if request.config_name else self.configurations()
+        if request.config_name:
+            configs = [request.config_name]
+        elif request.instance_name:
+            configs = [
+                c
+                for c in self.configurations()
+                if self.config_service.configuration_matches_instance(
+                    c, request.instance_name, request.no_cache
+                )
+            ]
+        else:
+            configs = self.configurations()
         for config in configs:
-            for instance in self.config_service.resolve_instance_names(config, request.instance_name, request.no_cache):
-                yield config, instance, self.config_service._get_connector_for_host(config, instance)
+            for instance in self.config_service.resolve_instance_names(
+                config, request.instance_name, request.no_cache
+            ):
+                yield config, instance, self.config_service._get_connector_for_host(
+                    config, instance
+                )
 
     def schemas(self, request: ScopeRequest) -> List[Any]:
-        return [schema for _, instance, connector in self._scope(request) for schema in connector.list_schemas(instance_name=instance, no_cache=request.no_cache)]
+        found = []
+        for _, instance, connector in self._scope(request):
+            found.extend(connector.list_schemas(instance_name=instance, no_cache=request.no_cache))
+        return found
 
     def tables(self, request: TablesRequest) -> List[Any]:
         found = []
         for _, instance, connector in self._scope(request):
-            schemas = [Schema(name=request.schema_name)] if request.schema_name else connector.list_schemas(instance_name=instance, no_cache=request.no_cache)
+            schemas = (
+                [Schema(name=request.schema_name)]
+                if request.schema_name
+                else connector.list_schemas(instance_name=instance, no_cache=request.no_cache)
+            )
             for schema in schemas:
-                found.extend(connector.list_tables(instance_name=instance, schema_name=schema.name, limit=request.limit, offset=request.offset, no_cache=request.no_cache))
+                found.extend(
+                    connector.list_tables(
+                        instance_name=instance,
+                        schema_name=schema.name,
+                        limit=request.limit,
+                        offset=request.offset,
+                        no_cache=request.no_cache,
+                    )
+                )
         return found
 
     def describe(self, request: DescribeRequest) -> List[Any]:
@@ -68,16 +113,63 @@ class IntrospectionService:
         store = get_metadata_store() if request.save_metadata or formats else None
         ai_service = AIDocumentationService() if request.generate_ai_docs else None
         for config, instance, connector in self._scope(request):
-            schemas = [Schema(name=request.schema_name)] if request.schema_name else connector.list_schemas(instance_name=instance, no_cache=request.no_cache)
+            schemas = (
+                [Schema(name=request.schema_name)]
+                if request.schema_name
+                else connector.list_schemas(instance_name=instance, no_cache=request.no_cache)
+            )
             for schema in schemas:
-                tables = [Table(name=request.table_name, schema_name=schema.name)] if request.table_name else connector.list_tables(instance_name=instance, schema_name=schema.name, no_cache=request.no_cache)
+                tables = (
+                    [Table(name=request.table_name, schema_name=schema.name)]
+                    if request.table_name
+                    else connector.list_tables(
+                        instance_name=instance, schema_name=schema.name, no_cache=request.no_cache
+                    )
+                )
                 for table in tables:
-                    description = connector.describe_table(instance_name=instance, schema_name=schema.name, table_name=table.name, no_cache=request.no_cache)
-                    schema_description = description.model_dump(exclude={"ai_documentation", "ai_generation_status", "ai_generation_error"})
+                    description = connector.describe_table(
+                        instance_name=instance,
+                        schema_name=schema.name,
+                        table_name=table.name,
+                        no_cache=request.no_cache,
+                    )
+                    description = description.model_copy(update={"config_name": config})
+                    schema_description = build_schema_description(description)
                     ai_documentation = None
                     if ai_service:
-                        ai_documentation = ai_service.generate_table_documentation(schema_description)
-                        description = description.model_copy(update={"ai_documentation": ai_documentation, "ai_generation_status": "generated" if ai_documentation else "failed", "ai_generation_error": None if ai_documentation else ai_service.last_error})
+                        existing = (
+                            store.get_table_metadata(config, instance, schema.name, table.name)
+                            if (store and request.only_if_changed)
+                            else None
+                        )
+                        if (
+                            existing
+                            and existing.get("schema_description") == schema_description
+                            and existing.get("ai_documentation")
+                        ):
+                            ai_documentation = existing["ai_documentation"]
+                            description = description.model_copy(
+                                update={
+                                    "ai_documentation": ai_documentation,
+                                    "ai_generation_status": "reused",
+                                    "ai_generation_error": None,
+                                }
+                            )
+                        else:
+                            ai_documentation = ai_service.generate_table_documentation(
+                                schema_description
+                            )
+                            description = description.model_copy(
+                                update={
+                                    "ai_documentation": ai_documentation,
+                                    "ai_generation_status": "generated"
+                                    if ai_documentation
+                                    else "failed",
+                                    "ai_generation_error": None
+                                    if ai_documentation
+                                    else ai_service.last_error,
+                                }
+                            )
                     results.append(description)
                     if store:
                         store.save_table_metadata(
