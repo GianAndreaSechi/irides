@@ -33,6 +33,7 @@ class MySQLConnector(BaseConnector):
             raise ValueError("MySQL connector requires 'host', 'user', and 'password' in connection_params.")
 
         password_fingerprint = hashlib.sha256((self.password or "").encode()).hexdigest()[:12]
+        self._auth_fingerprint = hashlib.sha256(f"{self.user}:{password_fingerprint}".encode()).hexdigest()[:12]
         pool_key = f"{self.host}:{self.port}:{self.user}:{password_fingerprint}"
         if pool_key not in MySQLConnector._pools:
             try:
@@ -84,8 +85,13 @@ class MySQLConnector(BaseConnector):
             if conn:
                 conn.close()
 
+    def _cache_scope(self) -> str:
+        auth = getattr(self, "_auth_fingerprint", "")
+        port = getattr(self, "port", 3306)
+        return f"{self.host}:{port}:{auth}" if auth else f"{self.host}:{port}"
+
     def list_instances(self, no_cache: bool = False) -> List[Instance]:
-        cache_key = f"mysql_instances:{self.host}"
+        cache_key = f"mysql_instances:{self._cache_scope()}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Instance(**d) for d in cached_data]
@@ -99,7 +105,7 @@ class MySQLConnector(BaseConnector):
         return instances
 
     def list_schemas(self, instance_name: str, no_cache: bool = False) -> List[Schema]:
-        cache_key = f"mysql_schemas:{self.host}:{instance_name}"
+        cache_key = f"mysql_schemas:{self._cache_scope()}:{instance_name}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Schema(**d) for d in cached_data]
@@ -116,7 +122,7 @@ class MySQLConnector(BaseConnector):
 
     def list_tables(self, instance_name: str, schema_name: str, limit: Optional[int] = None, offset: Optional[int] = None, no_cache: bool = False) -> List[Table]:
         limit, offset = validate_limit_offset(limit, offset)
-        cache_key = f"mysql_tables:{self.host}:{instance_name}:{schema_name}:{limit}:{offset}"
+        cache_key = f"mysql_tables:{self._cache_scope()}:{instance_name}:{schema_name}:{limit}:{offset}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Table(**d) for d in cached_data]
@@ -150,7 +156,7 @@ class MySQLConnector(BaseConnector):
         return tables
 
     def describe_table(self, instance_name: str, schema_name: str, table_name: str, no_cache: bool = False) -> TableDescription:
-        cache_key = f"mysql_describe_table:{self.host}:{instance_name}:{schema_name}:{table_name}"
+        cache_key = f"mysql_describe_table:{self._cache_scope()}:{instance_name}:{schema_name}:{table_name}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return TableDescription(**cached_data)

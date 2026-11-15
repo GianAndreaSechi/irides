@@ -1,12 +1,17 @@
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+try:
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+except ImportError:  # pragma: no cover - optional extra 'aws'
+    boto3 = None  # type: ignore[assignment]
+    BotoCoreError = ClientError = Exception  # type: ignore[misc,assignment]
+
 from typing import List, Dict, Any, Optional
 from core.db_connector.interface import BaseConnector
 from core.db_connector.models import Instance, Schema, Table, Column, TableDescription
 from core.db_connector.models.table_details import Partition
 from core.db_connector.sql_utils import validate_limit_offset
 from loguru import logger
-from ..cache_manager import CacheManager
+from ..cache_manager import CacheManager, hash_auth_context
 
 
 class AthenaConnector(BaseConnector):
@@ -38,6 +43,13 @@ class AthenaConnector(BaseConnector):
         self.region = connection_params.get("region")
         if not self.region:
             raise ValueError("Athena connector requires 'region' in connection_params.")
+        if boto3 is None:
+            raise ImportError("Missing optional dependency 'boto3'. Install with: pip install 'irides-core[aws]'")
+
+        self._auth_fingerprint = hash_auth_context(
+            connection_params.get("aws_access_key_id"),
+            self.catalog,
+        )
 
         boto_kwargs: Dict[str, Any] = {"region_name": self.region}
         if connection_params.get("aws_access_key_id"):
@@ -57,12 +69,17 @@ class AthenaConnector(BaseConnector):
             logger.exception("Failed to connect to Athena.")
             raise ConnectionError(f"Failed to connect to Athena: {e}")
 
+    def _cache_scope(self) -> str:
+        auth = getattr(self, "_auth_fingerprint", "")
+        catalog = getattr(self, "catalog", "AwsDataCatalog")
+        return f"{self.region}:{catalog}:{auth}" if auth else f"{self.region}"
+
     # ------------------------------------------------------------------
     # list_instances  →  Athena data catalogs
     # ------------------------------------------------------------------
 
     def list_instances(self, no_cache: bool = False) -> List[Instance]:
-        cache_key = f"athena_instances:{self.region}"
+        cache_key = f"athena_instances:{self._cache_scope()}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Instance(**d) for d in cached_data]
@@ -85,7 +102,7 @@ class AthenaConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     def list_schemas(self, instance_name: str, no_cache: bool = False) -> List[Schema]:
-        cache_key = f"athena_schemas:{self.region}:{instance_name}"
+        cache_key = f"athena_schemas:{self._cache_scope()}:{instance_name}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Schema(**d) for d in cached_data]
@@ -116,7 +133,7 @@ class AthenaConnector(BaseConnector):
         no_cache: bool = False,
     ) -> List[Table]:
         limit, offset = validate_limit_offset(limit, offset)
-        cache_key = f"athena_tables:{self.region}:{instance_name}:{schema_name}:{limit}:{offset}"
+        cache_key = f"athena_tables:{self._cache_scope()}:{instance_name}:{schema_name}:{limit}:{offset}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Table(**d) for d in cached_data]
@@ -150,7 +167,7 @@ class AthenaConnector(BaseConnector):
         table_name: str,
         no_cache: bool = False,
     ) -> TableDescription:
-        cache_key = f"athena_describe_table:{self.region}:{instance_name}:{schema_name}:{table_name}"
+        cache_key = f"athena_describe_table:{self._cache_scope()}:{instance_name}:{schema_name}:{table_name}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return TableDescription(**cached_data)
