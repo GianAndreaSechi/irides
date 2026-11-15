@@ -26,7 +26,7 @@ def register_tools(mcp):
         response_format = TOON_RESPONSE_FORMAT
         api_response = await api_client.get("/configurations", no_cache=no_cache, response_format=response_format)
         if "error" in api_response:
-            return GenericResponse(message=api_response["error"])
+            return GenericResponse(message=api_response["error"], error=api_response["error"])
         
         if response_format == TOON_RESPONSE_FORMAT:
             return ToonResponse(toon=toons.dumps(api_response.get("data")))
@@ -45,7 +45,7 @@ def register_tools(mcp):
         response_format = TOON_RESPONSE_FORMAT
         api_response = await api_client.post("/instances", payload=request.model_dump(), no_cache=no_cache, response_format=response_format)
         if "error" in api_response:
-            return GenericResponse(message=api_response["error"])
+            return GenericResponse(message=api_response["error"], error=api_response["error"])
 
         if response_format == TOON_RESPONSE_FORMAT:
             return ToonResponse(toon=toons.dumps(api_response.get("data")))
@@ -64,7 +64,7 @@ def register_tools(mcp):
         response_format = TOON_RESPONSE_FORMAT
         api_response = await api_client.post("/schemas", payload=request.model_dump(), no_cache=no_cache, response_format=response_format)
         if "error" in api_response:
-            return GenericResponse(message=api_response["error"])
+            return GenericResponse(message=api_response["error"], error=api_response["error"])
         
         if response_format == TOON_RESPONSE_FORMAT:
             return ToonResponse(toon=toons.dumps(api_response.get("data")))
@@ -83,7 +83,7 @@ def register_tools(mcp):
         response_format = TOON_RESPONSE_FORMAT
         api_response = await api_client.post("/tables", payload=request.model_dump(), no_cache=no_cache, response_format=response_format)
         if "error" in api_response:
-            return GenericResponse(message=api_response["error"])
+            return GenericResponse(message=api_response["error"], error=api_response["error"])
         
         if response_format == TOON_RESPONSE_FORMAT:
             return ToonResponse(toon=toons.dumps(api_response.get("data")))
@@ -110,7 +110,7 @@ def register_tools(mcp):
         response_format = TOON_RESPONSE_FORMAT
         api_response = await api_client.post("/describe", payload=request.model_dump(), no_cache=no_cache, response_format=response_format)
         if "error" in api_response:
-            return GenericResponse(message=api_response["error"])
+            return GenericResponse(message=api_response["error"], error=api_response["error"])
         
         if response_format == TOON_RESPONSE_FORMAT:
             return ToonResponse(toon=toons.dumps(api_response.get("data")))
