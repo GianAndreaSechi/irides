@@ -1,3 +1,4 @@
+import urllib.parse
 import toons
 from loguru import logger
 from typing import Optional
@@ -47,7 +48,7 @@ def register_tools(mcp):
             response_format=JSON_RESPONSE_FORMAT,
         )
         if "error" in api_response:
-            return GenericResponse(message=api_response["error"])
+            return GenericResponse(message=api_response["error"], error=api_response["error"])
 
         return GenericResponse(
             message="Scan job enqueued. Use get_scan_job(job_id) to poll status.",
@@ -63,10 +64,11 @@ def register_tools(mcp):
         Possible statuses: pending | running | completed | partial | failed
         """
         logger.info(f"MCP: Getting scan job {job_id} (include_results={include_results})")
-        endpoint = f"/scan/{job_id}?include_results={str(include_results).lower()}"
+        encoded_job_id = urllib.parse.quote(str(job_id), safe="")
+        endpoint = f"/scan/{encoded_job_id}?include_results={str(include_results).lower()}"
         api_response = await api_client.get(endpoint, response_format=JSON_RESPONSE_FORMAT)
         if "error" in api_response:
-            return GenericResponse(message=api_response["error"])
+            return GenericResponse(message=api_response["error"], error=api_response["error"])
 
         data = api_response.get("data", {})
 
@@ -89,6 +91,6 @@ def register_tools(mcp):
             response_format=JSON_RESPONSE_FORMAT,
         )
         if "error" in api_response:
-            return GenericResponse(message=api_response["error"])
+            return GenericResponse(message=api_response["error"], error=api_response["error"])
 
         return GenericResponse(message="Scan jobs retrieved successfully.", data=api_response.get("data"))

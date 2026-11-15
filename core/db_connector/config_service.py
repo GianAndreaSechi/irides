@@ -9,8 +9,14 @@ from core.db_connector.configurations import get_db_configurations
 class ConfigService:
     def __init__(self, connector_manager: ConnectorManager, config_file: Optional[str] = None):
         self.connector_manager = connector_manager
+        self.config_file = config_file
         self.db_configurations: Dict[str, Dict[str, Any]] = get_db_configurations(config_file=config_file)
         logger.info(f"ConfigService: Initialized with {len(self.db_configurations)} database configurations.")
+
+    def reload(self) -> None:
+        """Reload database configurations from config_file and environment variables."""
+        self.db_configurations = get_db_configurations(config_file=self.config_file)
+        logger.info(f"ConfigService: Reloaded {len(self.db_configurations)} database configurations.")
 
     def get_available_configurations(self) -> List[str]:
         logger.info("ConfigService: Fetching available configurations.")
@@ -50,8 +56,10 @@ class ConfigService:
         self, config_name: str, instance_name: str, no_cache: bool = False
     ) -> bool:
         """Return whether an instance belongs to a database configuration."""
+        details = self._get_connector_details(config_name)
+        connector_type = details["connector_type"]
         configured_hosts = self._get_hosts(config_name)
-        if configured_hosts:
+        if configured_hosts and connector_type not in {"trino", "presto"}:
             return instance_name in configured_hosts
         return instance_name in {
             instance.name for instance in self.list_instances(config_name, no_cache=no_cache)

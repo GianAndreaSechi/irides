@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install packages and test dependencies
+        run: |
+          python -m pip install --upgrade pip build
+          pip install -e "./core[dev]" -e ./cli
+          pip install fastapi uvicorn httpx pytest fakeredis toons
+
+      - name: Run offline test suite
+        run: |
+          pytest tests -m "not integration" --ignore=tests/core/connectors/test_mysql_connector.py
+
+      - name: Build core and cli distributions
+        run: |
+          python -m build ./core
+          python -m build ./cli
+
+      - name: Verify built wheels in clean virtualenv
+        run: |
+          python -m venv /tmp/wheel-test-env
+          /tmp/wheel-test-env/bin/pip install --upgrade pip
+          /tmp/wheel-test-env/bin/pip install ./core/dist/*.whl ./cli/dist/*.whl
+          /tmp/wheel-test-env/bin/python -c "import irides_core, irides_core.storage, core.db_connector.storage; assert irides_core.storage is core.db_connector.storage; from irides_core import Catalog, ConnectorManager, NullCacheManager; assert 'sqlite' in ConnectorManager(NullCacheManager()).get_available_connectors()"
+
+      - name: Run SQLite CLI smoke test
+        run: |
+          python examples/sqlite_demo/setup_demo.py
+          irides -c examples/sqlite_demo/irides.yaml describe --target demo_sqlite
+          irides manifest validate examples/sqlite_demo/database.md

@@ -26,10 +26,13 @@ from core.db_connector.exporting import ExportOptions
 STREAM_KEY_SUFFIX = "scan:queue"
 JOB_KEY_SUFFIX = "scan:job"
 RESULTS_KEY_SUFFIX = "scan:results"
+RESULTS_INDEX_KEY_SUFFIX = "scan:results_idx"
 JOBS_SET_SUFFIX = "scan:jobs"
 
 CONSUMER_GROUP = "scan-workers"
 RESULTS_TTL = int(os.getenv("SCAN_RESULTS_TTL_SECONDS", 86400 * 7))  # 7 days default
+DEFAULT_RECLAIM_MIN_IDLE_MS = int(os.getenv("WORKER_RECLAIM_MIN_IDLE_MS", 300000))  # 5 minutes default
+MAX_DELIVERIES = int(os.getenv("WORKER_MAX_DELIVERIES", 3))
 
 
 class JobStore:
@@ -131,6 +134,9 @@ class JobStore:
     def _results_key(self, job_id: str) -> str:
         return self._k(f"{RESULTS_KEY_SUFFIX}:{job_id}")
 
+    def _results_index_key(self, job_id: str) -> str:
+        return self._k(f"{RESULTS_INDEX_KEY_SUFFIX}:{job_id}")
+
     def _stream_key(self) -> str:
         return self._k(STREAM_KEY_SUFFIX)
 
@@ -197,10 +203,39 @@ class JobStore:
     # ------------------------------------------------------------------
 
     def mark_running(self, job_id: str):
+        now = datetime.now(timezone.utc).isoformat()
         self.r.hset(self._job_key(job_id), mapping={
-            "status":     ScanStatus.RUNNING.value,
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "status":       ScanStatus.RUNNING.value,
+            "started_at":   now,
+            "heartbeat_at": now,
         })
+
+    def heartbeat(
+        self,
+        job_id: str,
+        consumer_name: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ):
+        """Update job heartbeat timestamp and optionally reset stream message idle time.
+
+        Note: Redis ``XCLAIM ... JUSTID`` with ``min_idle_time=0`` on the current
+        consumer resets the Pending Entries List (PEL) idle timer to 0 without
+        incrementing the message delivery counter (``times_delivered``).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            self.r.hset(self._job_key(job_id), mapping={"heartbeat_at": now})
+            if consumer_name and message_id and hasattr(self.r, "xclaim"):
+                self.r.xclaim(
+                    self._stream_key(),
+                    CONSUMER_GROUP,
+                    consumer_name,
+                    min_idle_time=0,
+                    message_ids=[message_id],
+                    justid=True,
+                )
+        except Exception as e:
+            logger.debug(f"JobStore: heartbeat failed for {job_id}: {e}")
 
     def mark_completed(self, job_id: str, result_count: int):
         self.r.hset(self._job_key(job_id), mapping={
@@ -228,10 +263,51 @@ class JobStore:
     # Results (worker appends, API reads)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _result_identity(item: Dict[str, Any]) -> Optional[tuple]:
+        table_name = item.get("table_name")
+        if not table_name:
+            return None
+        return (
+            item.get("config_name") or "",
+            item.get("instance_name") or "",
+            item.get("schema_name") or "",
+            str(table_name),
+        )
+
     def append_result(self, job_id: str, table_description_dict: Dict[str, Any]):
+        results_key = self._results_key(job_id)
+        index_key = self._results_index_key(job_id)
+        serialized = json.dumps(table_description_dict)
+        identity = self._result_identity(table_description_dict)
+        if identity is not None and hasattr(self.r, "hget") and hasattr(self.r, "lset"):
+            identity_field = json.dumps(identity)
+            try:
+                existing_idx = self.r.hget(index_key, identity_field)
+                if existing_idx is not None:
+                    pipe = self.r.pipeline()
+                    pipe.lset(results_key, int(existing_idx), serialized)
+                    pipe.expire(results_key, RESULTS_TTL)
+                    pipe.expire(index_key, RESULTS_TTL)
+                    pipe.execute()
+                    return
+                pipe = self.r.pipeline()
+                pipe.rpush(results_key, serialized)
+                pipe.expire(results_key, RESULTS_TTL)
+                res = pipe.execute()
+                list_len = int(res[0]) if res and isinstance(res[0], int) else 1
+                idx = max(0, list_len - 1)
+                pipe2 = self.r.pipeline()
+                pipe2.hset(index_key, mapping={identity_field: str(idx)})
+                pipe2.expire(index_key, RESULTS_TTL)
+                pipe2.execute()
+                return
+            except Exception as e:
+                logger.debug(f"JobStore: deduplication index update failed for {job_id}: {e}")
+
         pipe = self.r.pipeline()
-        pipe.rpush(self._results_key(job_id), json.dumps(table_description_dict))
-        pipe.expire(self._results_key(job_id), RESULTS_TTL)
+        pipe.rpush(results_key, serialized)
+        pipe.expire(results_key, RESULTS_TTL)
         pipe.execute()
 
     def get_results(self, job_id: str) -> List[Dict[str, Any]]:
@@ -276,10 +352,17 @@ class JobStore:
             logger.warning(f"JobStore: read_pending failed: {e}")
             return []
 
-    def reclaim_abandoned(self, consumer_name: str, min_idle_ms: int = 30000, count: int = 10) -> list:
+    def reclaim_abandoned(
+        self,
+        consumer_name: str,
+        min_idle_ms: int = DEFAULT_RECLAIM_MIN_IDLE_MS,
+        count: int = 10,
+        max_deliveries: int = MAX_DELIVERIES,
+    ) -> list:
         """
         Reclaim messages that were delivered to a now-dead consumer and never acknowledged.
         Called on each poll cycle to recover from worker crashes/restarts.
+        Messages exceeding `max_deliveries` are treated as poison messages, marked FAILED, and acked.
 
         Returns a list of (message_id, data) tuples ready to process.
         """
@@ -291,12 +374,37 @@ class JobStore:
             if not pending:
                 return []
 
-            idle_ids = [
-                p["message_id"]
-                for p in pending
-                if p.get("time_since_delivered", 0) >= min_idle_ms
-                   and p.get("name") != consumer_name  # don't reclaim own messages
-            ]
+            idle_ids = []
+            poison_ids = []
+            for p in pending:
+                if p.get("name") == consumer_name:
+                    continue
+                if p.get("time_since_delivered", 0) < min_idle_ms:
+                    continue
+                times_delivered = p.get("times_delivered", 1)
+                if max_deliveries and times_delivered > max_deliveries:
+                    poison_ids.append(p["message_id"])
+                else:
+                    idle_ids.append(p["message_id"])
+
+            if poison_ids:
+                claimed_poison = self.r.xclaim(
+                    self._stream_key(),
+                    CONSUMER_GROUP,
+                    consumer_name,
+                    min_idle_time=min_idle_ms,
+                    message_ids=poison_ids,
+                )
+                for msg_id, data in claimed_poison or []:
+                    job_id = (data or {}).get("job_id")
+                    if job_id:
+                        self.mark_failed(
+                            job_id,
+                            f"Job exceeded maximum delivery attempts ({max_deliveries}) and was aborted.",
+                        )
+                    self.ack(msg_id)
+                    logger.error(f"JobStore: quarantined poison message {msg_id} (job_id={job_id})")
+
             if not idle_ids:
                 return []
 
@@ -313,3 +421,8 @@ class JobStore:
 
     def ack(self, message_id: str):
         self.r.xack(self._stream_key(), CONSUMER_GROUP, message_id)
+        if hasattr(self.r, "xdel"):
+            try:
+                self.r.xdel(self._stream_key(), message_id)
+            except Exception:
+                pass

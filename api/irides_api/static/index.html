@@ -29,23 +29,63 @@ function getInitialTheme() {
   catch { return 'dark'; }
 }
 
+function getInitialApiKey() {
+  try { return localStorage.getItem('irides_api_key') || ''; }
+  catch { return ''; }
+}
+
+function authHeaders(extra = {}) {
+  const headers = { Accept: 'application/json', ...extra };
+  try {
+    const key = localStorage.getItem('irides_api_key');
+    if (key) headers['X-API-Key'] = key;
+  } catch {}
+  return headers;
+}
+
 // ── API helpers ───────────────────────────────────────────────────────────────
 
 async function apiFetch(path) {
-  const r = await fetch(API + path, { headers: { Accept: 'application/json' } });
-  if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.detail || `HTTP ${r.status}`); }
+  const r = await fetch(API + path, { headers: authHeaders() });
+  if (!r.ok) {
+    if (r.status === 401) window.dispatchEvent(new CustomEvent('irides:unauthorized'));
+    const b = await r.json().catch(() => ({}));
+    const err = new Error(b.detail || `HTTP ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
   return (await r.json()).data;
 }
 
 async function apiPost(path, body) {
-  const r = await fetch(API + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
-  if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.detail || `HTTP ${r.status}`); }
+  const r = await fetch(API + path, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    if (r.status === 401) window.dispatchEvent(new CustomEvent('irides:unauthorized'));
+    const b = await r.json().catch(() => ({}));
+    const err = new Error(b.detail || `HTTP ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
   return (await r.json()).data;
 }
 
 async function apiPatch(path, body) {
-  const r = await fetch(API + path, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
-  if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.detail || `HTTP ${r.status}`); }
+  const r = await fetch(API + path, {
+    method: 'PATCH',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    if (r.status === 401) window.dispatchEvent(new CustomEvent('irides:unauthorized'));
+    const b = await r.json().catch(() => ({}));
+    const err = new Error(b.detail || `HTTP ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
   return (await r.json()).data;
 }
 
@@ -68,7 +108,7 @@ function SearchBox({ value, onChange }) {
   return (
     <div className="srch">
       <span className="srch-icon">⌕</span>
-      <input className="srch-input" type="text" value={value} onChange={e => onChange(e.target.value)} placeholder="Search…" />
+      <input className="srch-input" type="text" value={value} onChange={e => onChange(e.target.value)} placeholder="Filter loaded items…" />
       {value && <button className="srch-clear" onClick={() => onChange('')}>×</button>}
     </div>
   );
@@ -194,7 +234,8 @@ function DetailPanel({ inst, db, tbl, detail, onSaved, onReload }) {
     if (!Object.keys(payload).length) { setSaveStatus('err'); setSaveMsg('No editable fields.'); return; }
     setSaveStatus('saving');
     try {
-      const updated = await apiPatch(`/metadata/${inst}/${db}/${tbl}`, payload);
+      const cfgParam = detail?.config_name ? `?config_name=${encodeURIComponent(detail.config_name)}` : '';
+      const updated = await apiPatch(`/metadata/${encodeURIComponent(inst)}/${encodeURIComponent(db)}/${encodeURIComponent(tbl)}${cfgParam}`, payload);
       onSaved(updated); setEditing(false); setSaveStatus('ok');
       setTimeout(() => setSaveStatus(null), 3000);
     } catch (e) { setSaveStatus('err'); setSaveMsg(e.message); }
@@ -217,7 +258,8 @@ function DetailPanel({ inst, db, tbl, detail, onSaved, onReload }) {
           preformat,
         },
       });
-      const updated = await apiFetch(`/metadata/${inst}/${db}/${tbl}`);
+      const cfgParam = detail?.config_name ? `?config_name=${encodeURIComponent(detail.config_name)}` : '';
+      const updated = await apiFetch(`/metadata/${encodeURIComponent(inst)}/${encodeURIComponent(db)}/${encodeURIComponent(tbl)}${cfgParam}`);
       if (updated._unchanged) {
         setSaveStatus('warn'); setSaveMsg('Schema unchanged; no changes were saved.');
       } else {
@@ -362,6 +404,12 @@ function EmptyState({ inst, db }) {
 
 function App() {
   const [theme, setTheme] = useState(getInitialTheme);
+  const [apiKey, setApiKey] = useState(getInitialApiKey);
+  const [keyInput, setKeyInput] = useState(getInitialApiKey);
+  const [showKeyPrompt, setShowKeyPrompt] = useState(false);
+  const [configs,   setConfigs]   = useState([]);
+  const [selConfig, setSelConfig] = useState('');
+  const [ambiguousConfigs, setAmbiguousConfigs] = useState([]);
   const [instances, setInstances] = useState([]);
   const [databases, setDatabases] = useState([]);
   const [tables,    setTables]    = useState([]);
@@ -387,6 +435,25 @@ function App() {
     document.documentElement.dataset.theme = theme;
     try { localStorage.setItem('irides-theme', theme); } catch {}
   }, [theme]);
+
+  useEffect(() => {
+    const onUnauth = () => setShowKeyPrompt(true);
+    window.addEventListener('irides:unauthorized', onUnauth);
+    return () => window.removeEventListener('irides:unauthorized', onUnauth);
+  }, []);
+
+  function saveApiKey(e) {
+    if (e) e.preventDefault();
+    const trimmed = keyInput.trim();
+    try {
+      if (trimmed) localStorage.setItem('irides_api_key', trimmed);
+      else localStorage.removeItem('irides_api_key');
+    } catch {}
+    setApiKey(trimmed);
+    setShowKeyPrompt(false);
+    loadConfigs();
+    loadInstances(selConfig);
+  }
 
   // ── Poll scan job ──────────────────────────────────────────────────────────
 
@@ -425,6 +492,7 @@ function App() {
           preformat,
         },
       };
+      if (selConfig) payload.config_name = selConfig;
       if (schema_name) payload.schema_name = schema_name;
       const data = await apiPost('/scan', payload);
       setActiveScan(s => ({ ...s, jobId: data.job_id, status: data.status }));
@@ -436,22 +504,42 @@ function App() {
 
   // ── Data loading ───────────────────────────────────────────────────────────
 
-  function loadInstances() {
+  function loadConfigs() {
+    apiFetch('/metadata/_configs')
+      .then(d => setConfigs(Array.isArray(d) ? d : []))
+      .catch(() => {});
+  }
+
+  function loadInstances(cfgOverride = selConfig) {
     setLoad('inst', true); setErr('inst', null);
-    apiFetch(`/metadata?page_size=${PAGE_SZ}`)
+    const cfgQuery = cfgOverride ? `&config_name=${encodeURIComponent(cfgOverride)}` : '';
+    apiFetch(`/metadata?page_size=${PAGE_SZ}${cfgQuery}`)
       .then(d => setInstances(d.items || []))
       .catch(e => setErr('inst', e.message))
       .finally(() => setLoad('inst', false));
   }
 
-  useEffect(loadInstances, []);
+  useEffect(() => {
+    loadConfigs();
+    loadInstances('');
+  }, []);
+
+  function changeConfig(nextCfg) {
+    setSelConfig(nextCfg);
+    setSelInst(null); setSelDb(null); setSelTbl(null); setDetail(null);
+    setAmbiguousConfigs([]);
+    setDatabases([]); setTables([]);
+    loadInstances(nextCfg);
+  }
 
   function selectInstance(inst) {
     setSelInst(inst); setSelDb(null); setSelTbl(null); setDetail(null);
+    setAmbiguousConfigs([]);
     setDatabases([]); setTables([]);
     setFilters(f => ({ ...f, db: '', tbl: '' }));
     setLoad('db', true); setErr('db', null);
-    apiFetch(`/metadata/${encodeURIComponent(inst)}?page_size=${PAGE_SZ}`)
+    const cfgQuery = selConfig ? `&config_name=${encodeURIComponent(selConfig)}` : '';
+    apiFetch(`/metadata/${encodeURIComponent(inst)}?page_size=${PAGE_SZ}${cfgQuery}`)
       .then(d => setDatabases(d.items || []))
       .catch(e => setErr('db', e.message))
       .finally(() => setLoad('db', false));
@@ -459,25 +547,40 @@ function App() {
 
   function selectDatabase(db) {
     setSelDb(db); setSelTbl(null); setDetail(null); setTables([]);
+    setAmbiguousConfigs([]);
     setFilters(f => ({ ...f, tbl: '' }));
     setLoad('tbl', true); setErr('tbl', null);
-    apiFetch(`/metadata/${encodeURIComponent(selInst)}/${encodeURIComponent(db)}?page_size=${PAGE_SZ}`)
+    const cfgQuery = selConfig ? `&config_name=${encodeURIComponent(selConfig)}` : '';
+    apiFetch(`/metadata/${encodeURIComponent(selInst)}/${encodeURIComponent(db)}?page_size=${PAGE_SZ}${cfgQuery}`)
       .then(d => setTables(d.items || []))
       .catch(e => setErr('tbl', e.message))
       .finally(() => setLoad('tbl', false));
   }
 
-  function selectTable(tbl) {
-    setSelTbl(tbl); setDetail(null);
+  function selectTable(tbl, cfgOverride = selConfig) {
+    setSelTbl(tbl); setDetail(null); setErr('tbl', null); setAmbiguousConfigs([]);
     setLoad('detail', true);
-    apiFetch(`/metadata/${encodeURIComponent(selInst)}/${encodeURIComponent(selDb)}/${encodeURIComponent(tbl)}`)
+    const cfgQuery = cfgOverride ? `?config_name=${encodeURIComponent(cfgOverride)}` : '';
+    apiFetch(`/metadata/${encodeURIComponent(selInst)}/${encodeURIComponent(selDb)}/${encodeURIComponent(tbl)}${cfgQuery}`)
       .then(d => setDetail(d))
-      .catch(() => setDetail(null))
+      .catch(e => {
+        setDetail(null);
+        setErr('tbl', e.message);
+        if (e.status === 409) {
+          const match = /\[([^\]]+)\]/.exec(e.message || '');
+          if (match) {
+            const parsed = match[1].split(',').map(s => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+            setAmbiguousConfigs(parsed);
+          } else if (configs.length > 1) {
+            setAmbiguousConfigs(configs);
+          }
+        }
+      })
       .finally(() => setLoad('detail', false));
   }
 
-  function clearInstance() { setSelInst(null); setSelDb(null); setSelTbl(null); setDetail(null); setDatabases([]); setTables([]); }
-  function clearDatabase()  { setSelDb(null); setSelTbl(null); setDetail(null); setTables([]); }
+  function clearInstance() { setSelInst(null); setSelDb(null); setSelTbl(null); setDetail(null); setAmbiguousConfigs([]); setDatabases([]); setTables([]); }
+  function clearDatabase()  { setSelDb(null); setSelTbl(null); setDetail(null); setAmbiguousConfigs([]); setTables([]); }
 
   return (
     <div className="app-shell">
@@ -486,15 +589,43 @@ function App() {
         <span className="hdr-title">Irides<span className="hdr-subtitle">Knowledge explorer</span></span>
         {selInst && <><div className="hdr-divider"/><Breadcrumb inst={selInst} db={selDb} tbl={selTbl} onInst={clearInstance} onDb={clearDatabase}/></>}
         <div className="hdr-tools">
+          <select
+            className="hdr-refresh"
+            value={selConfig}
+            onChange={e => changeConfig(e.target.value)}
+            title="Filter by configuration target"
+            aria-label="Configuration target"
+          >
+            <option value="">All targets</option>
+            {configs.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <button className="hdr-refresh" onClick={() => { setKeyInput(apiKey); setShowKeyPrompt(v => !v); }} title="Configure API key">
+            <span>🔑</span><span>{apiKey ? 'Key set' : 'API Key'}</span>
+          </button>
           <button className="theme-toggle" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
             title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}>
             {theme === 'dark' ? '☀' : '☾'}
           </button>
-          <button className="hdr-refresh" onClick={loadInstances} title="Reload instances">
+          <button className="hdr-refresh" onClick={() => { loadConfigs(); loadInstances(selConfig); }} title="Reload instances">
             <span className={loading.inst ? 'spin' : ''}>↺</span><span>Refresh</span>
           </button>
         </div>
       </header>
+      {showKeyPrompt && (
+        <form onSubmit={saveApiKey} className="scan-bar" style={{display:'flex',gap:8,alignItems:'center',padding:'8px 16px'}}>
+          <span>🔑 <strong>API Key required or configured:</strong></span>
+          <input
+            type="password"
+            className="srch-input"
+            style={{maxWidth:280}}
+            value={keyInput}
+            onChange={e => setKeyInput(e.target.value)}
+            placeholder="Enter X-API-Key…"
+          />
+          <button type="submit" className="btn btn-primary">Save key</button>
+          <button type="button" className="btn btn-ghost" onClick={() => setShowKeyPrompt(false)}>Cancel</button>
+        </form>
+      )}
 
       <div className="layout">
         <aside className="sidebar">
@@ -513,14 +644,24 @@ function App() {
             onScan={selDb ? () => setPendingScan({ instance_name: selInst, schema_name: selDb, level: 'db' }) : null}
             scanning={scanningDb} />
           <NavPanel title="Tables" icon="▦"
-            items={tables} selected={selTbl} onSelect={selectTable}
+            items={tables} selected={selTbl} onSelect={t => selectTable(t, selConfig)}
             filter={filters.tbl} onFilter={v => setFilters(f => ({ ...f, tbl: v }))}
             loading={loading.tbl} error={errors.tbl} disabled={!selDb} />
         </aside>
 
         <main className="main">
+          {ambiguousConfigs.length > 0 && selTbl && !detail && (
+            <div className="alert alert-warn" style={{margin:16,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+              <span>⚠ Table <code>{selTbl}</code> exists in multiple targets. Choose one:</span>
+              {ambiguousConfigs.map(cfg => (
+                <button key={cfg} className="btn btn-secondary" onClick={() => selectTable(selTbl, cfg)}>
+                  ⚙ {cfg}
+                </button>
+              ))}
+            </div>
+          )}
           {selTbl && detail
-            ? <DetailPanel key={`${selInst}/${selDb}/${selTbl}`}
+            ? <DetailPanel key={`${detail.config_name || selConfig}/${selInst}/${selDb}/${selTbl}`}
                 inst={selInst} db={selDb} tbl={selTbl}
                 detail={detail} onSaved={setDetail} />
             : <EmptyState inst={selInst} db={selDb} />}

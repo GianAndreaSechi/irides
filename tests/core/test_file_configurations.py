@@ -8,6 +8,12 @@ from core.db_connector.configurations import (
     discover_config_file,
     load_file_configurations,
     get_db_configurations,
+    get_env_variables,
+    mask_configurations,
+    remove_target_configuration,
+    save_target_configuration,
+    set_env_variable,
+    unset_env_variable,
     _expand_env_vars,
 )
 
@@ -113,3 +119,123 @@ targets:
         os.environ.pop("DB_TARGETS", None)
         os.environ.pop("DB_TARGET_SHARED_DB_TYPE", None)
         os.environ.pop("DB_TARGET_SHARED_DB_HOST", None)
+
+
+def test_explicit_missing_config_file_raises():
+    with pytest.raises(FileNotFoundError, match="Configuration file not found"):
+        load_file_configurations("/nonexistent/path/to/irides.yaml")
+
+
+def test_invalid_yaml_config_file_raises(tmp_path):
+    bad_file = tmp_path / "bad.yaml"
+    bad_file.write_text("targets: [unterminated", encoding="utf-8")
+    with pytest.raises(ValueError, match="Failed to parse configuration file"):
+        load_file_configurations(bad_file)
+
+
+def test_normalized_target_key_collision_raises():
+    os.environ["DB_TARGETS"] = "sales-db,sales_db"
+    os.environ["DB_TARGET_SALES_DB_TYPE"] = "sqlite"
+    os.environ["DB_TARGET_SALES_DB_DATABASE"] = "/tmp/test.db"
+    try:
+        with pytest.raises(ValueError, match="collides with"):
+            get_db_configurations()
+    finally:
+        os.environ.pop("DB_TARGETS", None)
+        os.environ.pop("DB_TARGET_SALES_DB_TYPE", None)
+        os.environ.pop("DB_TARGET_SALES_DB_DATABASE", None)
+
+
+def test_env_variable_set_list_mask_and_unset(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("LITELLM_MODEL", raising=False)
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="Unsupported Irides environment variable"):
+        set_env_variable("UNEXPECTED_VAR", "val", env_file=env_file, update_environ=False)
+
+    set_env_variable("CUSTOM_VAR", "ok", env_file=env_file, update_environ=False, allow_custom=True)
+    set_env_variable("LITELLM_MODEL", "gpt-4o", env_file=env_file, update_environ=False)
+    set_env_variable("LITELLM_API_KEY", "sk-secret", env_file=env_file, update_environ=False)
+
+    assert (env_file.stat().st_mode & 0o777) == 0o600
+
+    masked = get_env_variables(env_file=env_file, mask_secrets=True)
+    assert masked["LITELLM_MODEL"] == "gpt-4o"
+    assert masked["LITELLM_API_KEY"] == "***"
+    assert masked["CUSTOM_VAR"] == "ok"
+
+    unmasked = get_env_variables(env_file=env_file, mask_secrets=False)
+    assert unmasked["LITELLM_API_KEY"] == "sk-secret"
+
+    unset_env_variable("LITELLM_API_KEY", env_file=env_file, update_environ=False)
+    after = get_env_variables(env_file=env_file, mask_secrets=False)
+    assert "LITELLM_API_KEY" not in after
+
+
+def test_save_target_configuration_yaml_splits_secrets_to_env(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "irides.yaml"
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("DB_TARGETS", raising=False)
+    monkeypatch.delenv("DB_TARGET_SALES_PG_PASSWORD", raising=False)
+
+    res = save_target_configuration(
+        "sales_pg",
+        "postgres",
+        {
+            "host": "db.internal",
+            "port": 5432,
+            "user": "reader",
+            "password": "s3cr3t-password",
+            "database": "sales",
+        },
+        fmt="yaml",
+        config_file=cfg_file,
+        env_file=env_file,
+        secrets_to_env=True,
+        update_environ=True,
+    )
+
+    assert res["format"] == "yaml"
+    assert res["env_keys"] == ["DB_TARGET_SALES_PG_PASSWORD"]
+    assert (env_file.stat().st_mode & 0o777) == 0o600
+
+    raw_yaml = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    assert raw_yaml["targets"]["sales_pg"]["password"] == "${DB_TARGET_SALES_PG_PASSWORD}"
+
+    resolved = get_db_configurations(config_file=cfg_file)
+    assert resolved["sales_pg"]["connection_params"]["password"] == "s3cr3t-password"
+
+    masked = mask_configurations(resolved)
+    assert masked["sales_pg"]["connection_params"]["password"] == "***"
+
+    rem = remove_target_configuration("sales_pg", config_file=cfg_file, env_file=env_file)
+    assert str(cfg_file) in rem["removed_from"]
+    raw_after = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+    assert "sales_pg" not in raw_after["targets"]
+
+
+def test_save_and_remove_target_configuration_env_format(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("DB_TARGETS", raising=False)
+    monkeypatch.delenv("DB_TARGET_LOCAL_DUCK_TYPE", raising=False)
+    monkeypatch.delenv("DB_TARGET_LOCAL_DUCK_DATABASE", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    res = save_target_configuration(
+        "local_duck",
+        "duckdb",
+        {"database": ":memory:"},
+        fmt="env",
+        env_file=env_file,
+        update_environ=True,
+    )
+    assert res["format"] == "env"
+    assert "DB_TARGETS" in res["env_keys"]
+
+    configs = get_db_configurations()
+    assert configs["local_duck"]["connector_type"] == "duckdb"
+    assert configs["local_duck"]["connection_params"]["database"] == ":memory:"
+
+    remove_target_configuration("local_duck", fmt="env", env_file=env_file, update_environ=True)
+    assert "local_duck" not in get_db_configurations()

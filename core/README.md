@@ -1,6 +1,8 @@
-# Core
+# Core (`irides_core` / `core.db_connector`)
 
-Shared Python library used by both the **API** and the **Worker**. It provides database connector abstractions, Pydantic models, Redis cache management, configuration loading, metadata persistence, and the async job store.
+Shared Python library used by the **CLI**, **API**, and **Worker**. It provides the public `Catalog` facade, database connector abstractions, Pydantic models, optional Redis cache management, configuration loading, metadata persistence, project manifest validation, and the async job store.
+
+Both `import irides_core` and `import core.db_connector` are supported.
 
 ---
 

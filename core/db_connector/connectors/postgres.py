@@ -55,6 +55,7 @@ class PostgreSQLConnector(BaseConnector):
             )
 
         password_fingerprint = hashlib.sha256((self.password or "").encode()).hexdigest()[:12]
+        self._auth_fingerprint = hashlib.sha256(f"{self.user}:{password_fingerprint}".encode()).hexdigest()[:12]
         pool_key = f"{self.host}:{self.port}:{self.user}:{self.database}:{password_fingerprint}"
         if pool_key not in PostgreSQLConnector._pools:
             try:
@@ -91,12 +92,16 @@ class PostgreSQLConnector(BaseConnector):
                 conn.rollback()
                 self.pool.putconn(conn)
 
+    def _cache_scope(self) -> str:
+        auth = getattr(self, "_auth_fingerprint", "")
+        return f"{self.host}:{self.port}:{self.database}:{auth}" if auth else f"{self.host}:{self.port}:{self.database}"
+
     # ------------------------------------------------------------------
     # list_instances  →  the server host + version
     # ------------------------------------------------------------------
 
     def list_instances(self, no_cache: bool = False) -> List[Instance]:
-        cache_key = f"postgres_instances:{self.host}:{self.port}:{self.database}"
+        cache_key = f"postgres_instances:{self._cache_scope()}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Instance(**d) for d in cached_data]
@@ -112,7 +117,7 @@ class PostgreSQLConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     def list_schemas(self, instance_name: str, no_cache: bool = False) -> List[Schema]:
-        cache_key = f"postgres_schemas:{self.host}:{self.port}:{self.database}:{instance_name}"
+        cache_key = f"postgres_schemas:{self._cache_scope()}:{instance_name}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Schema(**d) for d in cached_data]
@@ -144,7 +149,7 @@ class PostgreSQLConnector(BaseConnector):
         no_cache: bool = False,
     ) -> List[Table]:
         limit, offset = validate_limit_offset(limit, offset)
-        cache_key = f"postgres_tables:{self.host}:{self.port}:{self.database}:{instance_name}:{schema_name}:{limit}:{offset}"
+        cache_key = f"postgres_tables:{self._cache_scope()}:{instance_name}:{schema_name}:{limit}:{offset}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Table(**d) for d in cached_data]
@@ -180,7 +185,7 @@ class PostgreSQLConnector(BaseConnector):
         table_name: str,
         no_cache: bool = False,
     ) -> TableDescription:
-        cache_key = f"postgres_describe_table:{self.host}:{self.port}:{self.database}:{instance_name}:{schema_name}:{table_name}"
+        cache_key = f"postgres_describe_table:{self._cache_scope()}:{instance_name}:{schema_name}:{table_name}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return TableDescription(**cached_data)
@@ -259,26 +264,40 @@ class PostgreSQLConnector(BaseConnector):
         rows = self._execute_query("""
             SELECT
                 kcu.column_name,
-                ccu.table_name  AS referenced_table,
-                ccu.column_name AS referenced_column,
-                tc.constraint_name
+                ccu.table_schema AS referenced_schema,
+                ccu.table_name   AS referenced_table,
+                ccu.column_name  AS referenced_column,
+                tc.constraint_name,
+                kcu.ordinal_position
             FROM information_schema.table_constraints tc
             JOIN information_schema.key_column_usage kcu
-                ON tc.constraint_name = kcu.constraint_name
-               AND tc.table_schema    = kcu.table_schema
-               AND tc.table_name      = kcu.table_name
-            JOIN information_schema.constraint_column_usage ccu
-                ON tc.constraint_name = ccu.constraint_name
+                ON tc.constraint_catalog = kcu.constraint_catalog
+               AND tc.constraint_schema  = kcu.constraint_schema
+               AND tc.constraint_name    = kcu.constraint_name
+               AND tc.table_schema       = kcu.table_schema
+               AND tc.table_name         = kcu.table_name
+            JOIN information_schema.referential_constraints rc
+                ON tc.constraint_catalog = rc.constraint_catalog
+               AND tc.constraint_schema  = rc.constraint_schema
+               AND tc.constraint_name    = rc.constraint_name
+            JOIN information_schema.key_column_usage ccu
+                ON rc.unique_constraint_catalog = ccu.constraint_catalog
+               AND rc.unique_constraint_schema  = ccu.constraint_schema
+               AND rc.unique_constraint_name    = ccu.constraint_name
+               AND kcu.position_in_unique_constraint = ccu.ordinal_position
             WHERE tc.constraint_type = 'FOREIGN KEY'
               AND tc.table_schema    = %s
-              AND tc.table_name      = %s;
+              AND tc.table_name      = %s
+            ORDER BY tc.constraint_name, kcu.ordinal_position;
         """, (schema_name, table_name))
         return [
             ForeignKey(
                 column_name=r["column_name"],
+                referenced_schema=r.get("referenced_schema"),
                 referenced_table=r["referenced_table"],
                 referenced_column=r["referenced_column"],
                 constraint_name=r["constraint_name"],
+                ordinal_position=r.get("ordinal_position"),
             )
             for r in rows
         ]

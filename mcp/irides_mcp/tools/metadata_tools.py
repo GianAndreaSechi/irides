@@ -1,3 +1,4 @@
+import urllib.parse
 import toons
 from loguru import logger
 from typing import Optional
@@ -5,6 +6,10 @@ from typing import Optional
 from ..services.api_client import api_client
 from ..models.responses.generic_response import GenericResponse, ToonResponse, UnifiedResponse
 from ..constants import TOON_RESPONSE_FORMAT, JSON_RESPONSE_FORMAT
+
+
+def _encode_seg(value: str) -> str:
+    return urllib.parse.quote(str(value), safe="")
 
 
 def register_tools(mcp):
@@ -25,6 +30,7 @@ def register_tools(mcp):
     async def list_stored_instances(
         page: Optional[int] = 1,
         page_size: Optional[int] = 20,
+        config_name: Optional[str] = None,
     ) -> UnifiedResponse:
         """
         List all instances that have at least one table saved in the metadata store.
@@ -35,13 +41,16 @@ def register_tools(mcp):
 
         Returns a paginated list: { items, total, page, page_size, pages }.
         """
-        logger.info(f"MCP: Listing stored metadata instances (page={page}, page_size={page_size})")
+        logger.info(f"MCP: Listing stored metadata instances (page={page}, page_size={page_size}, config_name={config_name})")
+        params = f"?page={page}&page_size={page_size}"
+        if config_name:
+            params += f"&config_name={_encode_seg(config_name)}"
         result = await api_client.get(
-            f"/metadata?page={page}&page_size={page_size}",
+            f"/metadata{params}",
             response_format=JSON_RESPONSE_FORMAT,
         )
         if "error" in result:
-            return GenericResponse(message=result["error"])
+            return GenericResponse(message=result["error"], error=result["error"])
         return GenericResponse(
             message="Stored instances retrieved successfully.",
             data=result.get("data"),
@@ -52,6 +61,7 @@ def register_tools(mcp):
         instance_name: str,
         page: Optional[int] = 1,
         page_size: Optional[int] = 20,
+        config_name: Optional[str] = None,
     ) -> UnifiedResponse:
         """
         List all databases/schemas saved in the metadata store for a given instance.
@@ -67,13 +77,16 @@ def register_tools(mcp):
 
         Returns a paginated list: { items, total, page, page_size, pages }.
         """
-        logger.info(f"MCP: Listing stored databases for instance '{instance_name}' (page={page})")
+        logger.info(f"MCP: Listing stored databases for instance '{instance_name}' (page={page}, config_name={config_name})")
+        params = f"?page={page}&page_size={page_size}"
+        if config_name:
+            params += f"&config_name={_encode_seg(config_name)}"
         result = await api_client.get(
-            f"/metadata/{instance_name}?page={page}&page_size={page_size}",
+            f"/metadata/{_encode_seg(instance_name)}{params}",
             response_format=JSON_RESPONSE_FORMAT,
         )
         if "error" in result:
-            return GenericResponse(message=result["error"])
+            return GenericResponse(message=result["error"], error=result["error"])
         return GenericResponse(
             message=f"Stored databases for '{instance_name}' retrieved successfully.",
             data=result.get("data"),
@@ -85,6 +98,7 @@ def register_tools(mcp):
         database_name: str,
         page: Optional[int] = 1,
         page_size: Optional[int] = 20,
+        config_name: Optional[str] = None,
     ) -> UnifiedResponse:
         """
         List all tables saved in the metadata store for a given instance and database.
@@ -99,13 +113,16 @@ def register_tools(mcp):
 
         Returns a paginated list: { items, total, page, page_size, pages }.
         """
-        logger.info(f"MCP: Listing stored tables for '{instance_name}/{database_name}' (page={page})")
+        logger.info(f"MCP: Listing stored tables for '{instance_name}/{database_name}' (page={page}, config_name={config_name})")
+        params = f"?page={page}&page_size={page_size}"
+        if config_name:
+            params += f"&config_name={_encode_seg(config_name)}"
         result = await api_client.get(
-            f"/metadata/{instance_name}/{database_name}?page={page}&page_size={page_size}",
+            f"/metadata/{_encode_seg(instance_name)}/{_encode_seg(database_name)}{params}",
             response_format=JSON_RESPONSE_FORMAT,
         )
         if "error" in result:
-            return GenericResponse(message=result["error"])
+            return GenericResponse(message=result["error"], error=result["error"])
         return GenericResponse(
             message=f"Stored tables for '{instance_name}/{database_name}' retrieved successfully.",
             data=result.get("data"),
@@ -116,6 +133,7 @@ def register_tools(mcp):
         instance_name: str,
         database_name: str,
         table_name: str,
+        config_name: Optional[str] = None,
     ) -> UnifiedResponse:
         """
         Retrieve the full stored metadata document for a specific table.
@@ -135,14 +153,16 @@ def register_tools(mcp):
             instance_name: Instance name (e.g. 'db-primary.example.internal').
             database_name: Database/schema name (e.g. 'example_schema').
             table_name:    Table name (e.g. 'example_table').
+            config_name:   Optional configuration name to disambiguate colliding targets.
         """
-        logger.info(f"MCP: Getting stored metadata for '{instance_name}/{database_name}/{table_name}'")
+        logger.info(f"MCP: Getting stored metadata for '{instance_name}/{database_name}/{table_name}' (config_name={config_name})")
+        params = f"?config_name={_encode_seg(config_name)}" if config_name else ""
         result = await api_client.get(
-            f"/metadata/{instance_name}/{database_name}/{table_name}",
+            f"/metadata/{_encode_seg(instance_name)}/{_encode_seg(database_name)}/{_encode_seg(table_name)}{params}",
             response_format=TOON_RESPONSE_FORMAT,
         )
         if "error" in result:
-            return GenericResponse(message=result["error"])
+            return GenericResponse(message=result["error"], error=result["error"])
         return ToonResponse(toon=toons.dumps(result.get("data")))
 
     @mcp.tool()
@@ -151,6 +171,7 @@ def register_tools(mcp):
         database_name: str,
         table_name: str,
         fields: dict,
+        config_name: Optional[str] = None,
     ) -> UnifiedResponse:
         """
         Merge custom fields into the stored metadata document for a specific table.
@@ -174,18 +195,20 @@ def register_tools(mcp):
             database_name: Database/schema name in the metadata store.
             table_name:    Table name in the metadata store.
             fields:        Dict of fields to merge into the document.
+            config_name:   Optional configuration name to disambiguate colliding targets.
         """
         logger.info(
             f"MCP: Updating stored metadata for '{instance_name}/{database_name}/{table_name}' "
-            f"with fields: {list(fields.keys())}"
+            f"(config_name={config_name}) with fields: {list(fields.keys())}"
         )
+        params = f"?config_name={_encode_seg(config_name)}" if config_name else ""
         result = await api_client.patch(
-            f"/metadata/{instance_name}/{database_name}/{table_name}",
+            f"/metadata/{_encode_seg(instance_name)}/{_encode_seg(database_name)}/{_encode_seg(table_name)}{params}",
             payload=fields,
             response_format=JSON_RESPONSE_FORMAT,
         )
         if "error" in result:
-            return GenericResponse(message=result["error"])
+            return GenericResponse(message=result["error"], error=result["error"])
         return GenericResponse(
             message=f"Stored metadata for '{table_name}' updated successfully.",
             data=result.get("data"),

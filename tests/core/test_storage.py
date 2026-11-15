@@ -3,7 +3,11 @@ import stat
 import pytest
 import yaml
 from core.db_connector.exporting import ExportFormat, ExportOptions
-from core.db_connector.storage import FileMetadataStore, build_metadata_key
+from core.db_connector.storage import (
+    AmbiguousMetadataError,
+    FileMetadataStore,
+    build_metadata_key,
+)
 
 
 @pytest.fixture
@@ -46,6 +50,16 @@ class TestFileMetadataStoreSanitize:
     def test_preserves_hyphen_and_underscore(self, store):
         result = store._sanitize("my-config_name")
         assert result == "my-config_name"
+
+    def test_rejects_dot_and_dotdot_segments(self, store):
+        with pytest.raises(ValueError, match="relative traversal segments are not allowed"):
+            store._sanitize(".")
+        with pytest.raises(ValueError, match="relative traversal segments are not allowed"):
+            store._sanitize("..")
+
+    def test_reversible_sanitization_prevents_collision(self, store):
+        assert store._sanitize("a/b") != store._sanitize("a:b")
+        assert store._sanitize("a/b") != store._sanitize("a_b")
 
 
 class TestFileMetadataStoreGetSave:
@@ -201,6 +215,62 @@ class TestExports:
 
         assert "idx_users" in path.read_text(encoding="utf-8")
 
+    def test_preformatter_disabled_renders_default_column(self, store, tmp_path):
+        schema = {
+            **SCHEMA_DESC,
+            "columns": [{"name": "status", "data_type": "text", "default_value": "'active'"}],
+        }
+        store.save_table_metadata(
+            "cfg",
+            "inst",
+            "sch",
+            "users",
+            schema,
+            export_options=ExportOptions(preformat=False),
+        )
+        path = tmp_path / "exports" / "markdown" / "cfg" / "inst" / "sch" / "users.md"
+        md = path.read_text(encoding="utf-8")
+        assert "| Name | Type | Nullable | Default | Description |" in md
+        assert "'active'" in md
+
+    def test_notes_and_classification_are_exported(self, store, tmp_path):
+        store.save_table_metadata("cfg", "inst", "sch", "users", SCHEMA_DESC)
+        store.update_table_metadata(
+            "inst",
+            "sch",
+            "users",
+            {"notes": "Critical operational note", "data_classification": "confidential"},
+        )
+        md_path = tmp_path / "exports" / "markdown" / "cfg" / "inst" / "sch" / "users.md"
+        okf_path = tmp_path / "exports" / "okf" / "catalog" / "cfg" / "inst" / "sch" / "users.md"
+        assert "Critical operational note" in md_path.read_text(encoding="utf-8")
+        assert "confidential" in md_path.read_text(encoding="utf-8")
+        assert "Critical operational note" in okf_path.read_text(encoding="utf-8")
+
+    def test_table_named_index_is_included_in_okf_bundle_index(self, store, tmp_path):
+        store.save_table_metadata("cfg", "inst", "sch", "index", {**SCHEMA_DESC, "table_name": "index"})
+        index_md = (tmp_path / "exports" / "okf" / "catalog" / "index.md").read_text(encoding="utf-8")
+        assert "sch.index" in index_md
+
+    def test_frontmatter_with_dashes_in_description_is_indexed_correctly(self, store, tmp_path):
+        ai_doc = {"summary": "Line one --- line two", "column_descriptions": {}}
+        store.save_table_metadata("cfg", "inst", "sch", "users", SCHEMA_DESC, ai_documentation=ai_doc)
+        index_md = (tmp_path / "exports" / "okf" / "catalog" / "index.md").read_text(encoding="utf-8")
+        assert "sch.users" in index_md
+        assert "Line one --- line two" in index_md
+
+    def test_dynamodb_gsi_preserved_in_essential_export(self, store, tmp_path):
+        schema = {
+            **SCHEMA_DESC,
+            "indexes": [
+                {"name": "gsi_email", "column_names": ["email"], "is_unique": False, "is_primary": False, "type": "GSI"},
+            ],
+        }
+        store.save_table_metadata("cfg", "inst", "sch", "users", schema)
+        md = (tmp_path / "exports" / "markdown" / "cfg" / "inst" / "sch" / "users.md").read_text(encoding="utf-8")
+        assert "gsi_email" in md
+        assert "(GSI)" in md
+
 
 class TestOnlyIfChanged:
     def test_unchanged_schema_returns_unchanged_flag(self, store):
@@ -228,6 +298,22 @@ class TestOnlyIfChanged:
         result = store.save_table_metadata("cfg", "inst", "sch", "new_table", SCHEMA_DESC, only_if_changed=True)
         assert "_unchanged" not in result
         assert store.get_table_metadata("cfg", "inst", "sch", "new_table") is not None
+
+    def test_ai_doc_change_writes_even_when_schema_unchanged(self, store):
+        store.save_table_metadata("cfg", "inst", "sch", "users", SCHEMA_DESC, ai_documentation=None)
+        ai_doc = {"summary": "Newly generated summary", "column_descriptions": {}}
+        result = store.save_table_metadata(
+            "cfg",
+            "inst",
+            "sch",
+            "users",
+            SCHEMA_DESC,
+            ai_documentation=ai_doc,
+            only_if_changed=True,
+        )
+        assert "_unchanged" not in result
+        loaded = store.get_table_metadata("cfg", "inst", "sch", "users")
+        assert loaded["ai_documentation"] == ai_doc
 
 
 class TestCustomFieldCarryForward:
@@ -355,6 +441,20 @@ class TestFindTableMetadata:
         result = store.find_table_metadata("host_a", "db1", "users")
         assert result is not None
 
+    def test_strict_raises_ambiguous_error_across_multiple_configs(self, store):
+        store.save_table_metadata("cfg1", "host_a", "db1", "users", SCHEMA_DESC)
+        store.save_table_metadata("cfg2", "host_a", "db1", "users", SCHEMA_DESC)
+        with pytest.raises(AmbiguousMetadataError):
+            store.find_table_metadata("host_a", "db1", "users", strict=True)
+
+    def test_config_name_disambiguates_across_multiple_configs(self, store):
+        store.save_table_metadata("cfg1", "host_a", "db1", "users", SCHEMA_DESC)
+        store.save_table_metadata("cfg2", "host_a", "db1", "users", {**SCHEMA_DESC, "columns": []})
+        result = store.find_table_metadata("host_a", "db1", "users", config_name="cfg2", strict=True)
+        assert result is not None
+        assert result["config_name"] == "cfg2"
+        assert result["schema_description"]["columns"] == []
+
 
 class TestUpdateTableMetadata:
     def test_merges_custom_fields(self, store):
@@ -404,3 +504,78 @@ class TestUpdateTableMetadata:
         path = tmp_path / "exports" / "okf" / "catalog" / "cfg" / "host_a" / "db1" / "users.md"
 
         assert "owner: team-a" in path.read_text(encoding="utf-8")
+
+
+class TestLegacyPathMigration:
+    def _write_legacy_record(self, tmp_path, config="cfg", instance="host:3306", schema="db/main", table="users"):
+        import json
+        from datetime import datetime, timezone
+
+        legacy_path = (
+            tmp_path
+            / FileMetadataStore._legacy_sanitize(config)
+            / FileMetadataStore._legacy_sanitize(instance)
+            / FileMetadataStore._legacy_sanitize(schema)
+            / f"{FileMetadataStore._legacy_sanitize(table)}.json"
+        )
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "metadata_key": build_metadata_key(config, instance, schema, table),
+            "config_name": config,
+            "instance_name": instance,
+            "schema_name": schema,
+            "table_name": table,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "schema_description": SCHEMA_DESC,
+            "ai_documentation": None,
+            "owner": "legacy-owner",
+        }
+        legacy_path.write_text(json.dumps(record), encoding="utf-8")
+        return legacy_path
+
+    def test_save_migrates_and_removes_legacy_file(self, store, tmp_path):
+        legacy_path = self._write_legacy_record(tmp_path)
+        assert legacy_path.exists()
+
+        store.save_table_metadata("cfg", "host:3306", "db/main", "users", SCHEMA_DESC, only_if_changed=True)
+        canonical_path = store._get_file_path("cfg", "host:3306", "db/main", "users")
+        assert canonical_path.exists()
+        assert not legacy_path.exists()
+        loaded = store.get_table_metadata("cfg", "host:3306", "db/main", "users")
+        assert loaded["owner"] == "legacy-owner"
+
+    def test_update_migrates_and_removes_legacy_file_without_ambiguity(self, store, tmp_path):
+        legacy_path = self._write_legacy_record(tmp_path)
+        updated = store.update_table_metadata(
+            "host:3306",
+            "db/main",
+            "users",
+            {"notes": "migrated"},
+            strict=True,
+        )
+        assert updated is not None
+        assert updated["owner"] == "legacy-owner"
+        assert updated["notes"] == "migrated"
+        assert not legacy_path.exists()
+        assert store._get_file_path("cfg", "host:3306", "db/main", "users").exists()
+
+    def test_coexisting_legacy_and_canonical_in_same_config_not_ambiguous(self, store, tmp_path):
+        legacy_path = self._write_legacy_record(tmp_path)
+        store.save_table_metadata(
+            "cfg",
+            "host:3306",
+            "db/main",
+            "users",
+            {**SCHEMA_DESC, "columns": []},
+            export_options=ExportOptions(formats=[]),
+        )
+        # Re-create legacy file to simulate external pre-migration state with both files present
+        self._write_legacy_record(tmp_path)
+        assert legacy_path.exists()
+
+        found = store.find_table_metadata("host:3306", "db/main", "users", strict=True)
+        assert found is not None
+        assert found["schema_description"]["columns"] == []
+        instances = store.list_instances()
+        assert instances["items"] == ["host:3306"]
+        assert store.list_configs() == ["cfg"]

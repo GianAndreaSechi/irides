@@ -1,0 +1,4 @@
+targets:
+  demo_sqlite:
+    type: sqlite
+    database: ./demo.sqlite

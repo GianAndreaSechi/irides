@@ -1,9 +1,10 @@
 import sys
 
-from core.db_connector.connectors.mysql import MySQLConnector
 from core.db_connector.cache_manager import CacheManager
 from core.db_connector.models import TableDescription
 from loguru import logger
+
+__test__ = False
 
 # Configuration for MySQL Test (ADJUST THESE VALUES)
 MYSQL_CONFIG = {
@@ -15,6 +16,8 @@ MYSQL_CONFIG = {
 }
 
 def run_basic_mysql_test():
+    from core.db_connector.connectors.mysql import MySQLConnector
+
     logger.info("--- Running Basic MySQL Test ---")
     connector = None
     try:

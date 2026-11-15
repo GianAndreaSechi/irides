@@ -1,12 +1,16 @@
 import re
-import duckdb
+try:
+    import duckdb
+except ImportError:  # pragma: no cover - optional extra 'duckdb'
+    duckdb = None  # type: ignore[assignment]
 from typing import List, Dict, Any, Optional
 from core.db_connector.interface import BaseConnector
 from core.db_connector.models import Instance, Schema, Table, Column, TableDescription
 from core.db_connector.models.table_details import PrimaryKey, ForeignKey, Index
 from core.db_connector.sql_utils import quote_sql_string, validate_limit_offset
 from loguru import logger
-from ..cache_manager import CacheManager # Import CacheManager
+from ..cache_manager import CacheManager
+
 
 class DuckDBConnector(BaseConnector):
     """
@@ -17,9 +21,13 @@ class DuckDBConnector(BaseConnector):
     def get_type() -> str:
         return "duckdb"
 
-    def __init__(self, connection_params: Dict[str, Any], cache_manager: CacheManager): # Add cache_manager
-        super().__init__(connection_params, cache_manager) # Pass to super
-        self.database = connection_params.get("database", ":memory:") # Default to in-memory
+    def __init__(self, connection_params: Dict[str, Any], cache_manager: CacheManager):
+        super().__init__(connection_params, cache_manager)
+        if duckdb is None:
+            raise ImportError("Missing optional dependency 'duckdb'. Install with: pip install 'irides-core[duckdb]'")
+        self.database = connection_params.get("database", ":memory:")
+        self.instance_name = connection_params.get("instance_name") or self.database
+        self._valid_instances = {self.instance_name, self.database}
 
         # Test connection
         try:
@@ -30,9 +38,10 @@ class DuckDBConnector(BaseConnector):
             logger.exception(f"Failed to connect to DuckDB database at {self.database}")
             raise ConnectionError(f"Failed to connect to DuckDB database at {self.database}: {e}")
 
-    def _get_connection(self) -> duckdb.DuckDBPyConnection:
+    def _get_connection(self):
         """Helper to get a database connection."""
-        return duckdb.connect(database=self.database, read_only=True)
+        is_memory = self.database == ":memory:"
+        return duckdb.connect(database=self.database, read_only=not is_memory)
 
     def _execute_query(self, query: str, params: Optional[tuple] = None) -> List[Dict[str, Any]]:
         """Helper to execute a query and return results as list of dicts."""
@@ -43,11 +52,8 @@ class DuckDBConnector(BaseConnector):
                 result = conn.execute(query, params).fetchall()
             else:
                 result = conn.execute(query).fetchall()
-            
-            # DuckDB fetchall returns a list of tuples, need to convert to list of dicts
-            # Get column names from cursor description
+
             columns = [desc[0] for desc in conn.description]
-            
             return [dict(zip(columns, row)) for row in result]
         except Exception as e:
             logger.exception(f"DuckDB query failed: {e} - Query: {query}")
@@ -57,14 +63,13 @@ class DuckDBConnector(BaseConnector):
                 conn.close()
 
     def list_instances(self, no_cache: bool = False) -> List[Instance]:
-        cache_key = f"duckdb_instances:{self.database}"
+        cache_key = f"duckdb_instances:{self.instance_name}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
-            return [Instance(**d) for d in cached_data] # Deserialize to Instance objects
+            return [Instance(**d) for d in cached_data]
 
-        # For DuckDB, the instance is the database file itself or :memory:
-        instances = [Instance(name=self.database, version=duckdb.__version__)]
-        self.cache_manager.set_cached_data(cache_key, [i.model_dump() for i in instances]) # Serialize for caching
+        instances = [Instance(name=self.instance_name, version=duckdb.__version__)]
+        self.cache_manager.set_cached_data(cache_key, [i.model_dump() for i in instances])
         return instances
 
     def list_schemas(self, instance_name: str, no_cache: bool = False) -> List[Schema]:
@@ -73,15 +78,33 @@ class DuckDBConnector(BaseConnector):
         if cached_data:
             return [Schema(**d) for d in cached_data]
 
-        if instance_name != self.database:
-            logger.error(f"Instance name '{instance_name}' does not match connected database '{self.database}'")
-            raise ValueError(f"Instance name '{instance_name}' does not match connected database '{self.database}'")
-        
-        rows = self._execute_query("PRAGMA database_list;")
-        schemas = []
-        for row in rows:
-            schemas.append(Schema(name=row["database_name"]))
-        
+        if instance_name not in self._valid_instances:
+            logger.error(f"Instance name '{instance_name}' does not match connected database '{self.instance_name}'")
+            raise ValueError(f"Instance name '{instance_name}' does not match connected database '{self.instance_name}'")
+
+        try:
+            rows = self._execute_query(
+                """
+                SELECT DISTINCT schema_name
+                FROM information_schema.schemata
+                WHERE catalog_name = current_database()
+                  AND schema_name NOT IN ('information_schema', 'pg_catalog')
+                ORDER BY schema_name;
+                """
+            )
+        except Exception:
+            rows = self._execute_query(
+                """
+                SELECT DISTINCT schema_name
+                FROM information_schema.schemata
+                WHERE schema_name NOT IN ('information_schema', 'pg_catalog')
+                ORDER BY schema_name;
+                """
+            )
+        schemas = [Schema(name=row["schema_name"]) for row in rows]
+        if not schemas:
+            schemas = [Schema(name="main")]
+
         self.cache_manager.set_cached_data(cache_key, [s.model_dump() for s in schemas])
         return schemas
 
@@ -92,16 +115,17 @@ class DuckDBConnector(BaseConnector):
         if cached_data:
             return [Table(**d) for d in cached_data]
 
-        if instance_name != self.database:
-            logger.error(f"Instance name '{instance_name}' does not match connected database '{self.database}'")
-            raise ValueError(f"Instance name '{instance_name}' does not match connected database '{self.database}'")
-        
-        query = f"""
+        if instance_name not in self._valid_instances:
+            logger.error(f"Instance name '{instance_name}' does not match connected database '{self.instance_name}'")
+            raise ValueError(f"Instance name '{instance_name}' does not match connected database '{self.instance_name}'")
+
+        query = """
         SELECT table_name
         FROM information_schema.tables
         WHERE table_schema = ?
+        ORDER BY table_name
         """
-        
+
         if limit is not None:
             query += f" LIMIT {limit}"
         if offset is not None:
@@ -111,7 +135,7 @@ class DuckDBConnector(BaseConnector):
 
         rows = self._execute_query(query, (schema_name,))
         tables = [Table(name=row["table_name"], schema_name=schema_name) for row in rows]
-        
+
         self.cache_manager.set_cached_data(cache_key, [t.model_dump() for t in tables])
         return tables
 
@@ -121,13 +145,13 @@ class DuckDBConnector(BaseConnector):
         if cached_data:
             return TableDescription(**cached_data)
 
-        if instance_name != self.database:
-            logger.error(f"Instance name '{instance_name}' does not match connected database '{self.database}'")
-            raise ValueError(f"Instance name '{instance_name}' does not match connected database '{self.database}'")
-        
+        if instance_name not in self._valid_instances:
+            logger.error(f"Instance name '{instance_name}' does not match connected database '{self.instance_name}'")
+            raise ValueError(f"Instance name '{instance_name}' does not match connected database '{self.instance_name}'")
+
         query = f"PRAGMA table_info({quote_sql_string(f'{schema_name}.{table_name}')});"
         rows = self._execute_query(query)
-        
+
         columns = []
         for row in rows:
             columns.append(
@@ -136,10 +160,10 @@ class DuckDBConnector(BaseConnector):
                     data_type=row["type"],
                     is_nullable=not row["notnull"],
                     default_value=row["dflt_value"],
-                    comment=None # DuckDB PRAGMA table_info does not provide column comments directly
+                    comment=None,
                 )
             )
-        
+
         primary_key = self._get_primary_key_details(schema_name, table_name)
         foreign_keys = self._get_foreign_key_details(schema_name, table_name)
         indexes = self._get_index_details(schema_name, table_name)
@@ -151,7 +175,7 @@ class DuckDBConnector(BaseConnector):
             columns=columns,
             primary_key=primary_key,
             foreign_keys=foreign_keys,
-            indexes=indexes
+            indexes=indexes,
         )
         self.cache_manager.set_cached_data(cache_key, table_description.model_dump())
         return table_description
@@ -166,7 +190,7 @@ class DuckDBConnector(BaseConnector):
         """
         rows = self._execute_query(query, (table_name, schema_name))
         if rows:
-            col_names = rows[0].get('constraint_column_names', [])
+            col_names = rows[0].get("constraint_column_names", [])
             if isinstance(col_names, list) and col_names:
                 return PrimaryKey(column_names=col_names)
         return None
@@ -174,31 +198,62 @@ class DuckDBConnector(BaseConnector):
     def _get_foreign_key_details(self, schema_name: str, table_name: str) -> List[ForeignKey]:
         query = """
             SELECT
-                kcu.column_name,
-                ccu.table_name AS referenced_table,
-                ccu.column_name AS referenced_column,
-                tc.constraint_name
-            FROM information_schema.table_constraints AS tc
-            JOIN information_schema.key_column_usage AS kcu
-                ON tc.constraint_name = kcu.constraint_name
-                AND tc.table_schema = kcu.table_schema
-                AND tc.table_name = kcu.table_name
-            JOIN information_schema.constraint_column_usage AS ccu
-                ON ccu.constraint_name = tc.constraint_name
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_name = ?
-              AND tc.table_schema = ?
+                constraint_name,
+                constraint_column_names,
+                referenced_table,
+                referenced_column_names
+            FROM duckdb_constraints()
+            WHERE table_name = ?
+              AND schema_name = ?
+              AND constraint_type = 'FOREIGN KEY'
         """
-        rows = self._execute_query(query, (table_name, schema_name))
-        return [
-            ForeignKey(
-                column_name=row['column_name'],
-                referenced_table=row['referenced_table'],
-                referenced_column=row['referenced_column'],
-                constraint_name=row['constraint_name']
-            )
-            for row in rows
-        ]
+        try:
+            rows = self._execute_query(query, (table_name, schema_name))
+            foreign_keys: List[ForeignKey] = []
+            for row in rows:
+                src_cols = row.get("constraint_column_names") or []
+                ref_cols = row.get("referenced_column_names") or []
+                ref_table = row.get("referenced_table") or ""
+                cname = row.get("constraint_name")
+                for pos, (src_col, ref_col) in enumerate(zip(src_cols, ref_cols), start=1):
+                    foreign_keys.append(
+                        ForeignKey(
+                            column_name=src_col,
+                            referenced_table=ref_table,
+                            referenced_column=ref_col,
+                            constraint_name=cname,
+                            ordinal_position=pos,
+                        )
+                    )
+            return foreign_keys
+        except Exception:
+            fallback_query = """
+                SELECT
+                    kcu.column_name,
+                    ccu.table_name AS referenced_table,
+                    ccu.column_name AS referenced_column,
+                    tc.constraint_name
+                FROM information_schema.table_constraints AS tc
+                JOIN information_schema.key_column_usage AS kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                    AND tc.table_name = kcu.table_name
+                JOIN information_schema.constraint_column_usage AS ccu
+                    ON ccu.constraint_name = tc.constraint_name
+                WHERE tc.constraint_type = 'FOREIGN KEY'
+                  AND tc.table_name = ?
+                  AND tc.table_schema = ?
+            """
+            rows = self._execute_query(fallback_query, (table_name, schema_name))
+            return [
+                ForeignKey(
+                    column_name=row["column_name"],
+                    referenced_table=row["referenced_table"],
+                    referenced_column=row["referenced_column"],
+                    constraint_name=row["constraint_name"],
+                )
+                for row in rows
+            ]
 
     def _get_index_details(self, schema_name: str, table_name: str) -> List[Index]:
         query = """

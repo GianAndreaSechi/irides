@@ -4,6 +4,7 @@ from typing import Any, Optional, Union
 class GenericResponse(BaseModel):
     message: str
     data: Optional[Any] = None
+    error: Optional[str] = None
 
 class ToonResponse(BaseModel):
     """

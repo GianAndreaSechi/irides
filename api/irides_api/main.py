@@ -8,10 +8,12 @@ from loguru import logger
 from datetime import datetime, timezone
 import asyncio
 import os
+import secrets
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _UI_FILE = _STATIC_DIR / "index.html"
 
+from core.db_connector.configurations import ensure_dotenv_loaded
 from core.db_connector.manager import ConnectorManager
 from core.db_connector.models import (
     Instance, Schema, Table,
@@ -34,6 +36,8 @@ from api.irides_api.services.response_service import api_response
 from api.irides_api.services.scan_service import ScanService
 from core.db_connector.job_store import JobStore
 from api.irides_api.routers.metadata_router import router as metadata_router
+
+ensure_dotenv_loaded()
 
 app = FastAPI(
     title="Multi DB Describer API",
@@ -69,15 +73,55 @@ job_store = JobStore(
 )
 scan_service = ScanService(job_store, config_service)
 
+
+def get_config_service() -> ConfigService:
+    return config_service
+
+
+def get_instance_service() -> InstanceService:
+    return instance_service
+
+
+def get_schema_service() -> SchemaService:
+    return schema_service
+
+
+def get_table_service() -> TableService:
+    return table_service
+
+
+def get_describe_table_service() -> DescribeTableService:
+    return describe_table_service
+
+
+def get_scan_service() -> ScanService:
+    return scan_service
+
+
 # Helper to extract no_cache header
 def get_no_cache_header(no_cache: Optional[str] = Header(None)) -> bool:
     return no_cache is not None and no_cache.lower() == "true"
+
+
+def verify_api_key(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(None),
+) -> None:
+    expected = os.getenv("IRIDES_API_KEY")
+    if not expected:
+        return
+    token = x_api_key
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    if not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+
 
 # ---------------------------------------------------------------------------
 # v1 router — all business routes live here
 # ---------------------------------------------------------------------------
 
-v1 = APIRouter(prefix="/api/v1")
+v1 = APIRouter(prefix="/api/v1", dependencies=[Depends(verify_api_key)])
 
 @v1.get("/")
 async def read_root(http_request: Request):
@@ -94,22 +138,30 @@ async def ping(http_request: Request):
     )
 
 @v1.get("/configurations")
-async def get_available_configurations(http_request: Request, no_cache: bool = Depends(get_no_cache_header)):
+async def get_available_configurations(
+    http_request: Request,
+    no_cache: bool = Depends(get_no_cache_header),
+    cs: ConfigService = Depends(get_config_service),
+):
     """
     Get a list of all available database configurations.
     """
     logger.info("API: Fetching available configurations.")
-    data = config_service.get_available_configurations()
+    data = await asyncio.to_thread(cs.get_available_configurations)
     return api_response(http_request, "Available configurations retrieved successfully.", data)
 
 @v1.post("/connect")
-async def test_connection(req: ConnectionRequest, http_request: Request):
+async def test_connection(
+    req: ConnectionRequest,
+    http_request: Request,
+    cs: ConfigService = Depends(get_config_service),
+):
     """
     Test a connection to a specified database configuration.
     """
     logger.info(f"API: Attempting to test connection for config: {req.config_name}")
     try:
-        data = config_service.test_connection(req.config_name)
+        data = await asyncio.to_thread(cs.test_connection, req.config_name)
         return api_response(http_request, "Connection test successful.", data)
     except ValueError as e:
         logger.error(f"API: Connection test failed: {e}")
@@ -122,7 +174,12 @@ async def test_connection(req: ConnectionRequest, http_request: Request):
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
 @v1.post("/instances")
-async def list_instances_route(req: InstanceRequest, http_request: Request, no_cache: bool = Depends(get_no_cache_header)):
+async def list_instances_route(
+    req: InstanceRequest,
+    http_request: Request,
+    no_cache: bool = Depends(get_no_cache_header),
+    svc: InstanceService = Depends(get_instance_service),
+):
     """
     List all instances (e.g., hosts for MySQL, database files for SQLite)
     for a given connector type. If no connector types are specified,
@@ -131,7 +188,7 @@ async def list_instances_route(req: InstanceRequest, http_request: Request, no_c
     logger.info(f"API: Listing instances for config name: {req.config_name}")
     try:
         config_names = [req.config_name] if req.config_name else None
-        data = instance_service.list_instances(config_names, no_cache=no_cache)
+        data = await asyncio.to_thread(svc.list_instances, config_names, no_cache=no_cache)
         return api_response(http_request, "Instances retrieved successfully.", data)
     except ValueError as e:
         logger.error(f"API: Listing instances failed: {e}")
@@ -144,7 +201,12 @@ async def list_instances_route(req: InstanceRequest, http_request: Request, no_c
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
 @v1.post("/schemas")
-async def list_schemas_route(req: SchemaRequest, http_request: Request, no_cache: bool = Depends(get_no_cache_header)):
+async def list_schemas_route(
+    req: SchemaRequest,
+    http_request: Request,
+    no_cache: bool = Depends(get_no_cache_header),
+    svc: SchemaService = Depends(get_schema_service),
+):
     """
     List all schemas (databases) for a given instance and configuration.
     If config_name is not specified, lists schemas for all available configurations.
@@ -152,7 +214,12 @@ async def list_schemas_route(req: SchemaRequest, http_request: Request, no_cache
     """
     logger.info(f"API: Listing schemas for config: {req.config_name if req.config_name else 'all'}, instance: {req.instance_name if req.instance_name else 'all'}")
     try:
-        data = schema_service.list_schemas(req.config_name, req.instance_name, no_cache=no_cache)
+        data = await asyncio.to_thread(
+            svc.list_schemas,
+            req.config_name,
+            req.instance_name,
+            no_cache=no_cache,
+        )
         return api_response(http_request, "Schemas retrieved successfully.", data)
     except ValueError as e:
         logger.error(f"API: Listing schemas failed: {e}")
@@ -165,7 +232,12 @@ async def list_schemas_route(req: SchemaRequest, http_request: Request, no_cache
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
 @v1.post("/tables")
-async def list_tables_route(req: TableRequest, http_request: Request, no_cache: bool = Depends(get_no_cache_header)):
+async def list_tables_route(
+    req: TableRequest,
+    http_request: Request,
+    no_cache: bool = Depends(get_no_cache_header),
+    svc: TableService = Depends(get_table_service),
+):
     """
     List all tables for a given schema, instance, and configuration.
     If config_name is not specified, lists tables for all available configurations.
@@ -174,7 +246,15 @@ async def list_tables_route(req: TableRequest, http_request: Request, no_cache: 
     """
     logger.info(f"API: Listing tables for config: {req.config_name if req.config_name else 'all'}, instance: {req.instance_name if req.instance_name else 'all'}, schema: {req.schema_name if req.schema_name else 'all'}, limit: {req.limit if req.limit else 'none'}, offset: {req.offset if req.offset else 'none'}")
     try:
-        data = table_service.list_tables(req.config_name, req.instance_name, req.schema_name, req.limit, req.offset, no_cache=no_cache)
+        data = await asyncio.to_thread(
+            svc.list_tables,
+            req.config_name,
+            req.instance_name,
+            req.schema_name,
+            req.limit,
+            req.offset,
+            no_cache=no_cache,
+        )
         return api_response(http_request, "Tables retrieved successfully.", data)
     except ValueError as e:
         logger.error(f"API: Listing tables failed: {e}")
@@ -187,7 +267,12 @@ async def list_tables_route(req: TableRequest, http_request: Request, no_cache: 
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
 @v1.post("/describe")
-async def describe_table_route(req: DescribeTableRequest, http_request: Request, no_cache: bool = Depends(get_no_cache_header)):
+async def describe_table_route(
+    req: DescribeTableRequest,
+    http_request: Request,
+    no_cache: bool = Depends(get_no_cache_header),
+    svc: DescribeTableService = Depends(get_describe_table_service),
+):
     """
     Get a detailed description of a specific table, including columns,
     primary keys, foreign keys, and other indexes.
@@ -206,7 +291,7 @@ async def describe_table_route(req: DescribeTableRequest, http_request: Request,
     )
     try:
         data = await asyncio.to_thread(
-            describe_table_service.describe_table,
+            svc.describe_table,
             req.config_name,
             req.instance_name,
             req.schema_name,
@@ -234,7 +319,12 @@ async def describe_table_route(req: DescribeTableRequest, http_request: Request,
 # ---------------------------------------------------------------------------
 
 @v1.post("/scan", status_code=202)
-async def enqueue_scan(req: ScanRequest, http_request: Request, no_cache: bool = Depends(get_no_cache_header)):
+async def enqueue_scan(
+    req: ScanRequest,
+    http_request: Request,
+    no_cache: bool = Depends(get_no_cache_header),
+    svc: ScanService = Depends(get_scan_service),
+):
     """
     Enqueue an async scan job.
     The worker will describe all tables matching the given scope and store results.
@@ -252,7 +342,8 @@ async def enqueue_scan(req: ScanRequest, http_request: Request, no_cache: bool =
         f"only_if_changed={req.only_if_changed}, export_options={req.export_options.model_dump(mode='json')}"
     )
     try:
-        job = scan_service.enqueue_scan(
+        job = await asyncio.to_thread(
+            svc.enqueue_scan,
             req.config_name,
             req.instance_name,
             req.schema_name,
@@ -262,7 +353,12 @@ async def enqueue_scan(req: ScanRequest, http_request: Request, no_cache: bool =
             only_if_changed=req.only_if_changed,
             export_options=req.export_options,
         )
-        return api_response(http_request, "Scan job enqueued successfully.", job.model_dump(mode="json"))
+        return api_response(
+            http_request,
+            "Scan job enqueued successfully.",
+            job.model_dump(mode="json"),
+            status_code=202,
+        )
 
     except ConnectionError as e:
         logger.error(f"API: Scan enqueue failed — Redis unreachable: {e}")
@@ -276,19 +372,24 @@ async def enqueue_scan(req: ScanRequest, http_request: Request, no_cache: bool =
 
 
 @v1.get("/scan/{job_id}")
-async def get_scan_job(job_id: str, http_request: Request, include_results: bool = False):
+async def get_scan_job(
+    job_id: str,
+    http_request: Request,
+    include_results: bool = False,
+    svc: ScanService = Depends(get_scan_service),
+):
     """
     Get the status (and optionally results) of a scan job.
     Add ?include_results=true to retrieve the full list of TableDescriptions.
     """
     try:
-        job = scan_service.get_job(job_id)
+        job = await asyncio.to_thread(svc.get_job, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"Scan job '{job_id}' not found.")
 
         data = job.model_dump(mode="json")
         if include_results:
-            data["results"] = scan_service.get_job_results(job_id)
+            data["results"] = await asyncio.to_thread(svc.get_job_results, job_id)
 
         return api_response(http_request, "Scan job retrieved successfully.", data)
     except HTTPException:
@@ -299,12 +400,16 @@ async def get_scan_job(job_id: str, http_request: Request, include_results: bool
 
 
 @v1.get("/scans")
-async def list_scan_jobs(http_request: Request, limit: int = 50):
+async def list_scan_jobs(
+    http_request: Request,
+    limit: int = 50,
+    svc: ScanService = Depends(get_scan_service),
+):
     """
     List recent scan jobs (newest first, no results payload).
     """
     try:
-        jobs = scan_service.list_jobs(limit=limit)
+        jobs = await asyncio.to_thread(svc.list_jobs, limit=limit)
         return api_response(
             http_request,
             "Scan jobs retrieved successfully.",
@@ -322,6 +427,10 @@ app.include_router(v1)
 @app.get("/ui", response_class=HTMLResponse, include_in_schema=False)
 async def serve_ui():
     return _UI_FILE.read_text(encoding="utf-8")
+
+
+def create_app() -> FastAPI:
+    return app
 
 
 if __name__ == "__main__":

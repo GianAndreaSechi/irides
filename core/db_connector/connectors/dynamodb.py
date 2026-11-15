@@ -1,12 +1,17 @@
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+try:
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+except ImportError:  # pragma: no cover - optional extra 'aws'
+    boto3 = None  # type: ignore[assignment]
+    BotoCoreError = ClientError = Exception  # type: ignore[misc,assignment]
+
 from typing import List, Dict, Any, Optional
 from core.db_connector.interface import BaseConnector
 from core.db_connector.models import Instance, Schema, Table, Column, TableDescription
 from core.db_connector.models.table_details import PrimaryKey, Partition, Index
 from core.db_connector.sql_utils import validate_limit_offset
 from loguru import logger
-from ..cache_manager import CacheManager
+from ..cache_manager import CacheManager, hash_auth_context
 
 # DynamoDB scalar type codes → human-readable names
 _DYNAMO_TYPES: Dict[str, str] = {
@@ -55,6 +60,14 @@ class DynamoDBConnector(BaseConnector):
         self.region = connection_params.get("region")
         if not self.region:
             raise ValueError("DynamoDB connector requires 'region' in connection_params.")
+        if boto3 is None:
+            raise ImportError("Missing optional dependency 'boto3'. Install with: pip install 'irides-core[aws]'")
+
+        self.endpoint_url = connection_params.get("endpoint_url")
+        self._auth_fingerprint = hash_auth_context(
+            connection_params.get("aws_access_key_id"),
+            self.endpoint_url,
+        )
 
         boto_kwargs: Dict[str, Any] = {"region_name": self.region}
         for key in ("aws_access_key_id", "aws_secret_access_key", "aws_session_token", "endpoint_url"):
@@ -69,12 +82,16 @@ class DynamoDBConnector(BaseConnector):
             logger.exception("Failed to connect to DynamoDB.")
             raise ConnectionError(f"Failed to connect to DynamoDB: {e}")
 
+    def _cache_scope(self) -> str:
+        auth = getattr(self, "_auth_fingerprint", "")
+        return f"{self.region}:{auth}" if auth else f"{self.region}"
+
     # ------------------------------------------------------------------
     # list_instances  →  the AWS region as a single instance
     # ------------------------------------------------------------------
 
     def list_instances(self, no_cache: bool = False) -> List[Instance]:
-        cache_key = f"dynamodb_instances:{self.region}"
+        cache_key = f"dynamodb_instances:{self._cache_scope()}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Instance(**d) for d in cached_data]
@@ -88,7 +105,7 @@ class DynamoDBConnector(BaseConnector):
     # ------------------------------------------------------------------
 
     def list_schemas(self, instance_name: str, no_cache: bool = False) -> List[Schema]:
-        cache_key = f"dynamodb_schemas:{self.region}:{instance_name}"
+        cache_key = f"dynamodb_schemas:{self._cache_scope()}:{instance_name}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Schema(**d) for d in cached_data]
@@ -113,7 +130,7 @@ class DynamoDBConnector(BaseConnector):
         no_cache: bool = False,
     ) -> List[Table]:
         limit, offset = validate_limit_offset(limit, offset)
-        cache_key = f"dynamodb_tables:{self.region}:{instance_name}:{schema_name}:{limit}:{offset}"
+        cache_key = f"dynamodb_tables:{self._cache_scope()}:{instance_name}:{schema_name}:{limit}:{offset}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return [Table(**d) for d in cached_data]
@@ -150,7 +167,7 @@ class DynamoDBConnector(BaseConnector):
         table_name: str,
         no_cache: bool = False,
     ) -> TableDescription:
-        cache_key = f"dynamodb_describe_table:{self.region}:{instance_name}:{schema_name}:{table_name}"
+        cache_key = f"dynamodb_describe_table:{self._cache_scope()}:{instance_name}:{schema_name}:{table_name}"
         cached_data = self.cache_manager.get_cached_data(cache_key, no_cache)
         if cached_data:
             return TableDescription(**cached_data)
@@ -176,13 +193,15 @@ class DynamoDBConnector(BaseConnector):
             elif ks["KeyType"] == "RANGE":
                 range_key = ks["AttributeName"]
 
-        # Columns: only key attributes are schema-defined in DynamoDB
+        # Columns: only key attributes are schema-defined in DynamoDB.
+        # Primary key attributes (HASH/RANGE) are required; secondary index attributes are nullable.
+        primary_key_attrs = {k for k in (hash_key, range_key) if k is not None}
         key_attr_names: List[str] = [k for k in attr_types]
         columns = [
             Column(
                 name=name,
                 data_type=attr_types[name],
-                is_nullable=False,  # key attributes are always required
+                is_nullable=(name not in primary_key_attrs),
                 default_value=None,
                 comment=None,
             )
