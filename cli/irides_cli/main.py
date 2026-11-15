@@ -7,6 +7,7 @@ from typing import Any, List, Optional
 from dotenv import load_dotenv
 
 from core.db_connector.manifest import build_reverse_links, validate_project_manifest
+from irides_cli.controllers.config_controller import ConfigController
 from irides_cli.controllers.init_controller import InitController
 from irides_cli.controllers.introspection_controller import IntrospectionController
 from irides_cli.controllers.metadata_controller import MetadataController
@@ -28,6 +29,8 @@ def print_json(data: Any) -> None:
 def run(args: Any) -> Any:
     if args.command == "init":
         return InitController().execute(fmt=args.format, force=args.force)
+    if args.command == "config":
+        return ConfigController().execute(args)
     if args.command == "metadata":
         return MetadataController().execute(args)
     if args.command == "manifest":
@@ -60,10 +63,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     env_file = getattr(args, "env_file", None)
     if env_file:
         env_path = Path(env_file)
-        if not env_path.is_file():
+        allows_create = (
+            args.command == "config"
+            and getattr(args, "config_command", None) in {"set-env", "set-target"}
+        )
+        if not env_path.is_file() and not allows_create:
             print(f"irides: Environment file not found: {env_file}", file=sys.stderr)
             return 1
-        load_dotenv(dotenv_path=env_path, override=True)
+        if env_path.is_file():
+            load_dotenv(dotenv_path=env_path, override=True)
 
     try:
         result = run(args)

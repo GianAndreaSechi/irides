@@ -2,6 +2,8 @@
 
 import argparse
 
+from core.db_connector.configurations import SUPPORTED_CONNECTOR_TYPES
+
 
 def _add_scope_arguments(parser: argparse.ArgumentParser, *, table: bool = False) -> None:
     parser.add_argument(
@@ -163,5 +165,101 @@ def build_parser() -> argparse.ArgumentParser:
     )
     links_cmd.add_argument(
         "manifest_paths", nargs="+", help="One or more paths to database.md, YAML, or JSON manifests"
+    )
+
+    config_cmd = subparsers.add_parser(
+        "config", help="Manage Irides environment variables and database targets"
+    )
+    config_sub = config_cmd.add_subparsers(dest="config_command", required=True)
+
+    set_env_cmd = config_sub.add_parser("set-env", help="Set an environment variable in .env")
+    set_env_cmd.add_argument("key", help="Environment variable name")
+    set_env_cmd.add_argument("value", help="Environment variable value")
+    set_env_cmd.add_argument(
+        "--allow-custom",
+        action="store_true",
+        help="Allow setting variables outside the Irides supported key list",
+    )
+
+    unset_env_cmd = config_sub.add_parser(
+        "unset-env", help="Remove an environment variable from .env"
+    )
+    unset_env_cmd.add_argument("key", help="Environment variable name")
+
+    list_env_cmd = config_sub.add_parser(
+        "list-env", help="List Irides environment variables from .env and process env"
+    )
+    list_env_cmd.add_argument(
+        "--show-secrets",
+        action="store_true",
+        help="Show unmasked secret values",
+    )
+
+    set_target_cmd = config_sub.add_parser(
+        "set-target", help="Create or update a database target in irides.yaml/.json or .env"
+    )
+    set_target_cmd.add_argument("target_name", help="Target configuration name")
+    set_target_cmd.add_argument(
+        "--type",
+        required=True,
+        choices=sorted(SUPPORTED_CONNECTOR_TYPES),
+        help="Database connector type",
+    )
+    set_target_cmd.add_argument(
+        "--format",
+        choices=["yaml", "json", "env"],
+        default="yaml",
+        help="Storage format: yaml (default), json, or env",
+    )
+    set_target_cmd.add_argument(
+        "--inline-secrets",
+        action="store_true",
+        help="Keep passwords/secrets inline in YAML/JSON instead of storing them in .env",
+    )
+    set_target_cmd.add_argument("--host", help="Database host or URI")
+    set_target_cmd.add_argument("--port", type=int, help="Database port")
+    set_target_cmd.add_argument("--user", help="Database username")
+    set_target_cmd.add_argument("--password", help="Database password")
+    set_target_cmd.add_argument("--database", help="Database name or file path")
+    set_target_cmd.add_argument("--region", help="AWS region (Athena / DynamoDB)")
+    set_target_cmd.add_argument("--catalog", help="Glue catalog name (Athena)")
+    set_target_cmd.add_argument("--s3-output", dest="s3_output", help="S3 output URI (Athena)")
+    set_target_cmd.add_argument("--endpoint-url", dest="endpoint_url", help="Custom endpoint URL")
+    set_target_cmd.add_argument("--auth-source", dest="auth_source", help="MongoDB authSource")
+    set_target_cmd.add_argument("--http-scheme", dest="http_scheme", help="Trino/Presto HTTP scheme")
+    set_target_cmd.add_argument("--pool-size", dest="pool_size", type=int, help="Connection pool size")
+    set_target_cmd.add_argument("--tls", action="store_true", help="Enable TLS")
+    set_target_cmd.add_argument(
+        "--tls-allow-invalid",
+        dest="tls_allow_invalid",
+        action="store_true",
+        help="Allow invalid TLS certificates",
+    )
+    set_target_cmd.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Additional connection parameter (repeatable)",
+    )
+
+    remove_target_cmd = config_sub.add_parser(
+        "remove-target", help="Remove a database target from irides.yaml/.json and/or .env"
+    )
+    remove_target_cmd.add_argument("target_name", help="Target configuration name")
+    remove_target_cmd.add_argument(
+        "--format",
+        choices=["yaml", "json", "env"],
+        default=None,
+        help="Limit removal to a specific format",
+    )
+
+    show_cfg_cmd = config_sub.add_parser(
+        "show", help="Show resolved target configurations"
+    )
+    show_cfg_cmd.add_argument(
+        "--show-secrets",
+        action="store_true",
+        help="Show unmasked secret values",
     )
     return parser
