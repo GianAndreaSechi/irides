@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
+from loguru import logger
 
 from .ai_service import AIDocumentationService
 from .cache_manager import CacheManager, NullCacheManager
@@ -9,7 +10,7 @@ from .config_service import ConfigService
 from .exporting import ExportFormat, ExportOptions
 from .manager import ConnectorManager
 from .models import Instance, Schema, Table, TableDescription
-from .storage import BaseMetadataStore, get_metadata_store
+from .storage import BaseMetadataStore, FileMetadataStore, get_metadata_store
 
 
 @dataclass(frozen=True)
@@ -128,13 +129,18 @@ class Catalog:
 
     def instances(
         self,
-        target: Optional[str] = None,
+        target: Optional[str | Sequence[str]] = None,
         *,
         config_name: Optional[str] = None,
         no_cache: bool = False,
     ) -> List[Instance]:
-        effective_target = target or config_name
-        names = [effective_target] if effective_target else self.configurations()
+        effective_target = target if target is not None else config_name
+        if isinstance(effective_target, str):
+            names = [effective_target]
+        elif effective_target is not None:
+            names = list(effective_target)
+        else:
+            names = self.configurations()
         return [
             inst
             for name in names
@@ -196,6 +202,189 @@ class Catalog:
                 )
         return found
 
+    def iter_describe(
+        self,
+        target: Optional[str] = None,
+        instance: Optional[str] = None,
+        schema: Optional[str] = None,
+        table: Optional[str] = None,
+        *,
+        config_name: Optional[str] = None,
+        instance_name: Optional[str] = None,
+        schema_name: Optional[str] = None,
+        table_name: Optional[str] = None,
+        no_cache: bool = False,
+        generate_ai_docs: bool = False,
+        save_metadata: bool = False,
+        only_if_changed: bool = False,
+        export_options: Optional[ExportOptions] = None,
+        fail_fast: bool = False,
+        ai_service: Optional[AIDocumentationService] = None,
+        metadata_store: Optional[BaseMetadataStore] = None,
+    ) -> Iterator[DescribeOutcome]:
+        effective_target = target or config_name
+        effective_instance = instance or instance_name
+        effective_schema = schema or schema_name
+        effective_table = table or table_name
+        options = export_options if export_options is not None else ExportOptions(formats=[])
+        store = metadata_store if metadata_store is not None else self.metadata_store
+        if store is None and (save_metadata or options.formats):
+            store = get_metadata_store()
+        active_ai = (
+            ai_service
+            if ai_service is not None
+            else (AIDocumentationService() if generate_ai_docs else None)
+        )
+
+        if effective_target:
+            configs = [effective_target]
+        elif effective_instance:
+            configs = [
+                c
+                for c in self.configurations()
+                if self.config_service.configuration_matches_instance(
+                    c, effective_instance, no_cache
+                )
+            ]
+        else:
+            configs = self.configurations()
+
+        saved_count = 0
+        try:
+            for cfg in configs:
+                try:
+                    hosts = self.config_service.resolve_instance_names(
+                        cfg, effective_instance, no_cache
+                    )
+                    for inst in hosts:
+                        connector = self.config_service._get_connector_for_host(cfg, inst)
+                        schemas = (
+                            [Schema(name=effective_schema)]
+                            if effective_schema
+                            else connector.list_schemas(instance_name=inst, no_cache=no_cache)
+                        )
+                        for sch in schemas:
+                            tables = (
+                                [Table(name=effective_table, schema_name=sch.name)]
+                                if effective_table
+                                else connector.list_tables(
+                                    instance_name=inst,
+                                    schema_name=sch.name,
+                                    no_cache=no_cache,
+                                )
+                            )
+                            for tbl in tables:
+                                try:
+                                    desc = connector.describe_table(
+                                        instance_name=inst,
+                                        schema_name=sch.name,
+                                        table_name=tbl.name,
+                                        no_cache=no_cache,
+                                    ).model_copy(update={"config_name": cfg})
+                                    schema_dict = build_schema_description(desc)
+                                    ai_doc = None
+                                    if active_ai:
+                                        existing = (
+                                            store.get_table_metadata(cfg, inst, sch.name, tbl.name)
+                                            if (store is not None and only_if_changed)
+                                            else None
+                                        )
+                                        if (
+                                            only_if_changed
+                                            and isinstance(existing, dict)
+                                            and existing.get("schema_description") == schema_dict
+                                            and existing.get("ai_documentation") is not None
+                                        ):
+                                            ai_doc = existing["ai_documentation"]
+                                            desc = desc.model_copy(
+                                                update={
+                                                    "ai_documentation": ai_doc,
+                                                    "ai_generation_status": "reused",
+                                                    "ai_generation_error": None,
+                                                }
+                                            )
+                                        else:
+                                            ai_doc = active_ai.generate_table_documentation(
+                                                schema_dict
+                                            )
+                                            ai_status = "generated" if ai_doc else "failed"
+                                            ai_error = (
+                                                None
+                                                if ai_doc
+                                                else getattr(active_ai, "last_error", None)
+                                            )
+                                            desc = desc.model_copy(
+                                                update={
+                                                    "ai_documentation": ai_doc,
+                                                    "ai_generation_status": ai_status,
+                                                    "ai_generation_error": ai_error,
+                                                }
+                                            )
+                                    doc_record = None
+                                    if store is not None and (save_metadata or options.formats):
+                                        save_kwargs: Dict[str, Any] = dict(
+                                            config_name=cfg,
+                                            instance_name=inst,
+                                            schema_name=sch.name,
+                                            table_name=tbl.name,
+                                            schema_description=schema_dict,
+                                            ai_documentation=ai_doc,
+                                            only_if_changed=only_if_changed,
+                                            export_options=options,
+                                            save_metadata=save_metadata,
+                                        )
+                                        if isinstance(store, FileMetadataStore):
+                                            save_kwargs["rebuild_index"] = False
+                                        doc_record = store.save_table_metadata(**save_kwargs)
+                                        saved_count += 1
+                                    yield DescribeOutcome(
+                                        config_name=cfg,
+                                        instance_name=inst,
+                                        schema_name=sch.name,
+                                        table_name=tbl.name,
+                                        description=desc,
+                                        document=doc_record,
+                                    )
+                                except Exception as exc:
+                                    if fail_fast:
+                                        raise
+                                    error_msg = f"{cfg}/{inst}/{sch.name}/{tbl.name}: {exc}"
+                                    logger.warning(
+                                        "Catalog: failed to describe {}.{}: {}",
+                                        sch.name,
+                                        tbl.name,
+                                        exc,
+                                    )
+                                    yield DescribeOutcome(
+                                        config_name=cfg,
+                                        instance_name=inst,
+                                        schema_name=sch.name,
+                                        table_name=tbl.name,
+                                        error=error_msg,
+                                    )
+                except Exception as exc:
+                    if fail_fast:
+                        raise
+                    error_msg = f"{cfg}: {exc}"
+                    logger.warning("Catalog: error processing config {}: {}", cfg, exc)
+                    yield DescribeOutcome(
+                        config_name=cfg,
+                        instance_name=effective_instance or "",
+                        schema_name=effective_schema or "",
+                        table_name=effective_table or "",
+                        error=error_msg,
+                    )
+        finally:
+            if (
+                saved_count > 0
+                and isinstance(store, FileMetadataStore)
+                and ExportFormat.OKF in options.formats
+            ):
+                try:
+                    store.artifact_store.rebuild_okf_index()
+                except Exception as exc:
+                    logger.warning("Catalog: failed to rebuild OKF index: {}", exc)
+
     def describe(
         self,
         target: Optional[str] = None,
@@ -212,107 +401,30 @@ class Catalog:
         save_metadata: bool = False,
         only_if_changed: bool = False,
         export_options: Optional[ExportOptions] = None,
+        fail_fast: bool = False,
+        ai_service: Optional[AIDocumentationService] = None,
+        metadata_store: Optional[BaseMetadataStore] = None,
     ) -> List[DescribeOutcome]:
-        effective_target = target or config_name
-        effective_instance = instance or instance_name
-        effective_schema = schema or schema_name
-        effective_table = table or table_name
-        options = export_options or ExportOptions(formats=[])
-        store = self.metadata_store
-        if store is None and (save_metadata or options.formats):
-            store = get_metadata_store()
-        ai_service = AIDocumentationService() if generate_ai_docs else None
-        outcomes: List[DescribeOutcome] = []
-
-        for cfg, inst, connector in self.resolve_scope(
-            effective_target, effective_instance, no_cache=no_cache
-        ):
-            schemas = (
-                [Schema(name=effective_schema)]
-                if effective_schema
-                else connector.list_schemas(instance_name=inst, no_cache=no_cache)
+        return list(
+            self.iter_describe(
+                target=target,
+                instance=instance,
+                schema=schema,
+                table=table,
+                config_name=config_name,
+                instance_name=instance_name,
+                schema_name=schema_name,
+                table_name=table_name,
+                no_cache=no_cache,
+                generate_ai_docs=generate_ai_docs,
+                save_metadata=save_metadata,
+                only_if_changed=only_if_changed,
+                export_options=export_options,
+                fail_fast=fail_fast,
+                ai_service=ai_service,
+                metadata_store=metadata_store,
             )
-            for sch in schemas:
-                tables = (
-                    [Table(name=effective_table, schema_name=sch.name)]
-                    if effective_table
-                    else connector.list_tables(
-                        instance_name=inst, schema_name=sch.name, no_cache=no_cache
-                    )
-                )
-                for tbl in tables:
-                    try:
-                        desc = connector.describe_table(
-                            instance_name=inst,
-                            schema_name=sch.name,
-                            table_name=tbl.name,
-                            no_cache=no_cache,
-                        ).model_copy(update={"config_name": cfg})
-                        schema_dict = build_schema_description(desc)
-                        ai_doc = None
-                        if ai_service:
-                            existing = (
-                                store.get_table_metadata(cfg, inst, sch.name, tbl.name)
-                                if (store and only_if_changed)
-                                else None
-                            )
-                            if (
-                                existing
-                                and existing.get("schema_description") == schema_dict
-                                and existing.get("ai_documentation")
-                            ):
-                                ai_doc = existing["ai_documentation"]
-                                desc = desc.model_copy(
-                                    update={
-                                        "ai_documentation": ai_doc,
-                                        "ai_generation_status": "reused",
-                                        "ai_generation_error": None,
-                                    }
-                                )
-                            else:
-                                outcome = ai_service.generate_with_outcome(schema_dict)
-                                ai_doc = outcome.documentation
-                                desc = desc.model_copy(
-                                    update={
-                                        "ai_documentation": ai_doc,
-                                        "ai_generation_status": outcome.status,
-                                        "ai_generation_error": outcome.error,
-                                    }
-                                )
-                        doc_record = None
-                        if store and (save_metadata or options.formats):
-                            doc_record = store.save_table_metadata(
-                                config_name=cfg,
-                                instance_name=inst,
-                                schema_name=sch.name,
-                                table_name=tbl.name,
-                                schema_description=schema_dict,
-                                ai_documentation=ai_doc,
-                                only_if_changed=only_if_changed,
-                                export_options=options,
-                                save_metadata=save_metadata,
-                            )
-                        outcomes.append(
-                            DescribeOutcome(
-                                config_name=cfg,
-                                instance_name=inst,
-                                schema_name=sch.name,
-                                table_name=tbl.name,
-                                description=desc,
-                                document=doc_record,
-                            )
-                        )
-                    except Exception as exc:
-                        outcomes.append(
-                            DescribeOutcome(
-                                config_name=cfg,
-                                instance_name=inst,
-                                schema_name=sch.name,
-                                table_name=tbl.name,
-                                error=str(exc),
-                            )
-                        )
-        return outcomes
+        )
 
     def export(
         self,
