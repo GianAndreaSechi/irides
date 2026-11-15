@@ -5,6 +5,7 @@ from core.db_connector.manager import ConnectorManager
 from core.db_connector.config_service import ConfigService
 from core.db_connector.models import Schema, Table, TableDescription
 from core.db_connector.ai_service import AIDocumentationService
+from core.db_connector.catalog import build_schema_description
 from core.db_connector.storage import get_metadata_store
 from core.db_connector.exporting import ExportOptions
 
@@ -63,29 +64,47 @@ class DescribeTableService:
                             table_name=tbl.name,
                             no_cache=no_cache
                         )
-                        desc_dict = table_description.model_dump(
-                            exclude={"ai_documentation", "ai_generation_status", "ai_generation_error"}
-                        )
+                        table_description = table_description.model_copy(update={"config_name": c_name})
+                        desc_dict = build_schema_description(table_description)
                         ai_doc = None
                         ai_status = None
                         ai_error = None
                         if ai_service:
-                            logger.info(
-                                "DescribeTableService: Generating AI documentation for {}/{}/{}.",
-                                c_name,
-                                sch.name,
-                                tbl.name,
+                            existing = (
+                                metadata_store.get_table_metadata(c_name, host, sch.name, tbl.name)
+                                if (metadata_store and only_if_changed)
+                                else None
                             )
-                            ai_doc = ai_service.generate_table_documentation(desc_dict)
-                            ai_status = "generated" if ai_doc else "failed"
-                            ai_error = None if ai_doc else ai_service.last_error
-                            table_description = table_description.model_copy(
-                                update={
-                                    "ai_documentation": ai_doc,
-                                    "ai_generation_status": ai_status,
-                                    "ai_generation_error": ai_error,
-                                }
-                            )
+                            if (
+                                existing
+                                and existing.get("schema_description") == desc_dict
+                                and existing.get("ai_documentation")
+                            ):
+                                ai_doc = existing["ai_documentation"]
+                                table_description = table_description.model_copy(
+                                    update={
+                                        "ai_documentation": ai_doc,
+                                        "ai_generation_status": "reused",
+                                        "ai_generation_error": None,
+                                    }
+                                )
+                            else:
+                                logger.info(
+                                    "DescribeTableService: Generating AI documentation for {}/{}/{}.",
+                                    c_name,
+                                    sch.name,
+                                    tbl.name,
+                                )
+                                ai_doc = ai_service.generate_table_documentation(desc_dict)
+                                ai_status = "generated" if ai_doc else "failed"
+                                ai_error = None if ai_doc else ai_service.last_error
+                                table_description = table_description.model_copy(
+                                    update={
+                                        "ai_documentation": ai_doc,
+                                        "ai_generation_status": ai_status,
+                                        "ai_generation_error": ai_error,
+                                    }
+                                )
                         all_table_descriptions.append(table_description)
 
                         if metadata_store:

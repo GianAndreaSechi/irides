@@ -11,8 +11,9 @@ ENV PYTHONPATH=/app
 COPY core /app/core
 COPY api /app/api
 
-# Install the core package in editable mode
-RUN pip install --no-cache-dir -e /app/core
+# Install the core package with all connector drivers and AI extras
+RUN pip install --no-cache-dir -r /app/core/requirements.txt \
+ && pip install --no-cache-dir -e /app/core
 
 # Install remaining dependencies for the API
 RUN pip install --no-cache-dir -r /app/api/requirements.txt
