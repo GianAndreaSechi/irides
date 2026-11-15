@@ -288,3 +288,69 @@ def test_cli_config_target_yaml_and_env_roundtrip(tmp_path, monkeypatch, capsys)
     capsys.readouterr()
     assert cli_main(["-e", str(env_file), "config", "remove-target", "app_sqlite", "--format", "env"]) == 0
     capsys.readouterr()
+
+
+def test_catalog_iter_describe_rebuilds_okf_index_once_per_batch(demo_env):
+    from unittest.mock import patch
+    from core.db_connector.exporting import ExportOptions, FileArtifactStore
+
+    catalog = Catalog(config_file=demo_env["config_file"])
+    with patch.object(
+        FileArtifactStore,
+        "rebuild_okf_index",
+        autospec=True,
+        side_effect=FileArtifactStore.rebuild_okf_index,
+    ) as spy_rebuild:
+        outcomes = list(
+            catalog.iter_describe(
+                config_name="demo_sqlite",
+                schema_name="main",
+                save_metadata=True,
+                export_options=ExportOptions(),
+            )
+        )
+
+    assert len(outcomes) == 2
+    assert all(item.ok for item in outcomes)
+    assert spy_rebuild.call_count == 1
+    assert (demo_env["export_dir"] / "okf" / "catalog" / "index.md").exists()
+
+
+def test_catalog_iter_describe_fail_fast_vs_collect_errors():
+    from unittest.mock import MagicMock
+    from core.db_connector.models import Schema, Table
+
+    cs = MagicMock()
+    cs.get_available_configurations.return_value = ["cfg"]
+    cs.resolve_instance_names.return_value = ["host"]
+    connector = MagicMock()
+    connector.list_schemas.return_value = [Schema(name="sch")]
+    connector.list_tables.return_value = [
+        Table(name="broken", schema_name="sch"),
+        Table(name="healthy", schema_name="sch"),
+    ]
+    connector.describe_table.side_effect = [
+        RuntimeError("boom"),
+        MagicMock(
+            model_copy=lambda update=None: MagicMock(
+                model_dump=lambda exclude=None: {
+                    "instance_name": "host",
+                    "schema_name": "sch",
+                    "table_name": "healthy",
+                    "columns": [],
+                }
+            )
+        ),
+    ]
+    cs._get_connector_for_host.return_value = connector
+
+    catalog = Catalog(config_service=cs)
+    outcomes = list(catalog.iter_describe(config_name="cfg", fail_fast=False))
+    assert len(outcomes) == 2
+    assert outcomes[0].ok is False
+    assert "boom" in outcomes[0].error
+    assert outcomes[1].ok is True
+
+    connector.describe_table.side_effect = RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"):
+        list(catalog.iter_describe(config_name="cfg", fail_fast=True))
