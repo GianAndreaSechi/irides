@@ -93,6 +93,10 @@ class Catalog:
             except Exception:
                 pass
 
+    def reload(self) -> None:
+        """Reload target configurations from disk and environment."""
+        self.config_service.reload()
+
     def configurations(self) -> List[str]:
         return self.config_service.get_available_configurations()
 

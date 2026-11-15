@@ -2,7 +2,15 @@ from .ai_service import AIDocumentationService, AIGenerationOutcome
 from .cache_manager import CacheManager, NullCacheManager
 from .catalog import Catalog, DescribeOutcome, build_schema_description
 from .config_service import ConfigService
-from .configurations import get_db_configurations
+from .configurations import (
+    get_db_configurations,
+    get_env_variables,
+    mask_configurations,
+    remove_target_configuration,
+    save_target_configuration,
+    set_env_variable,
+    unset_env_variable,
+)
 from .exporting import ExportFormat, ExportOptions, FileArtifactStore
 from .interface import BaseConnector
 from .manager import ConnectorManager
@@ -71,8 +79,14 @@ __all__ = [
     "build_reverse_links",
     "build_schema_description",
     "get_db_configurations",
+    "get_env_variables",
     "get_metadata_store",
     "load_project_manifest",
+    "mask_configurations",
+    "remove_target_configuration",
+    "save_target_configuration",
+    "set_env_variable",
+    "unset_env_variable",
     "validate_project_manifest",
 ]
 

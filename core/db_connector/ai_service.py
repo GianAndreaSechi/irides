@@ -20,6 +20,9 @@ class AIDocumentationService:
     """Service to generate AI documentation for database table schemas using LiteLLM."""
 
     def __init__(self, model_name: Optional[str] = None):
+        from core.db_connector.configurations import ensure_dotenv_loaded
+
+        ensure_dotenv_loaded()
         self.model_name = model_name or os.getenv("LITELLM_MODEL") or "gpt-4o-mini"
         self.timeout = int(os.getenv("LITELLM_TIMEOUT_SECONDS", "120"))
         self.max_retries = int(os.getenv("LITELLM_MAX_RETRIES", "2"))

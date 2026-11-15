@@ -9,6 +9,7 @@ import tempfile
 from typing import Any, Dict, List, Optional
 from loguru import logger
 
+from core.db_connector.configurations import ensure_dotenv_loaded
 from core.db_connector.exporting import ExportFormat, ExportOptions, FileArtifactStore
 from core.db_connector.exporting.artifact_store import desanitize_segment, sanitize_segment
 
@@ -139,6 +140,7 @@ class FileMetadataStore(BaseMetadataStore):
     """File System implementation storing metadata as JSON files."""
 
     def __init__(self, base_dir: Optional[str] = None, export_dir: Optional[str] = None):
+        ensure_dotenv_loaded()
         explicit_base_dir = base_dir is not None
         if base_dir is None:
             base_dir = os.getenv("STORAGE_METADATA_DIR", "storage/metadata")
@@ -619,6 +621,7 @@ class FileMetadataStore(BaseMetadataStore):
 
 def get_metadata_store(store_type: Optional[str] = None) -> BaseMetadataStore:
     """Factory to get configured metadata store implementation."""
+    ensure_dotenv_loaded()
     store_type = store_type or os.getenv("METADATA_STORE_TYPE", "file")
     if store_type == "file":
         return FileMetadataStore()

@@ -38,8 +38,14 @@ from core.db_connector import (
     build_reverse_links,
     build_schema_description,
     get_db_configurations,
+    get_env_variables,
     get_metadata_store,
     load_project_manifest,
+    mask_configurations,
+    remove_target_configuration,
+    save_target_configuration,
+    set_env_variable,
+    unset_env_variable,
     validate_project_manifest,
 )
 
@@ -99,7 +105,13 @@ __all__ = [
     "build_reverse_links",
     "build_schema_description",
     "get_db_configurations",
+    "get_env_variables",
     "get_metadata_store",
     "load_project_manifest",
+    "mask_configurations",
+    "remove_target_configuration",
+    "save_target_configuration",
+    "set_env_variable",
+    "unset_env_variable",
     "validate_project_manifest",
 ]
