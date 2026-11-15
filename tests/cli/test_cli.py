@@ -354,3 +354,14 @@ def test_catalog_iter_describe_fail_fast_vs_collect_errors():
     connector.describe_table.side_effect = RuntimeError("boom")
     with pytest.raises(RuntimeError, match="boom"):
         list(catalog.iter_describe(config_name="cfg", fail_fast=True))
+
+
+def test_connector_manager_discovers_builtin_connectors_under_empty_path(monkeypatch):
+    import core.db_connector.connectors as connectors_pkg
+    from core.db_connector.cache_manager import NullCacheManager
+    from core.db_connector.manager import ConnectorManager
+
+    monkeypatch.setattr(connectors_pkg, "__path__", [])
+    monkeypatch.setattr(connectors_pkg, "__file__", None, raising=False)
+    mgr = ConnectorManager(NullCacheManager())
+    assert "sqlite" in mgr.get_available_connectors()

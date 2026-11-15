@@ -9,6 +9,7 @@ jobs:
   test-and-build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
 
@@ -41,7 +42,7 @@ jobs:
           python -m venv /tmp/wheel-test-env
           /tmp/wheel-test-env/bin/pip install --upgrade pip
           /tmp/wheel-test-env/bin/pip install ./core/dist/*.whl ./cli/dist/*.whl
-          /tmp/wheel-test-env/bin/python -c "import irides_core, irides_core.storage, core.db_connector.storage; assert irides_core.storage is core.db_connector.storage; from irides_core import Catalog"
+          /tmp/wheel-test-env/bin/python -c "import irides_core, irides_core.storage, core.db_connector.storage; assert irides_core.storage is core.db_connector.storage; from irides_core import Catalog, ConnectorManager, NullCacheManager; assert 'sqlite' in ConnectorManager(NullCacheManager()).get_available_connectors()"
 
       - name: Run SQLite CLI smoke test
         run: |

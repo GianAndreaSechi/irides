@@ -1,9 +1,21 @@
 import importlib
+from pathlib import Path
 import pkgutil
 from typing import Dict, Optional, Type
 from loguru import logger
 from .cache_manager import CacheManager, NullCacheManager
 from .interface import BaseConnector
+
+_BUILTIN_CONNECTOR_MODULES = (
+    "athena",
+    "duckdb",
+    "dynamodb",
+    "mongodb",
+    "mysql",
+    "postgres",
+    "sqlite",
+    "trino",
+)
 
 CONNECTOR_EXTRA_MAP: Dict[str, str] = {
     "mysql": "mysql",
@@ -45,7 +57,19 @@ class ConnectorManager:
         """
         import core.db_connector.connectors as connectors_package
 
-        for _, name, _ in pkgutil.iter_modules(connectors_package.__path__):
+        search_paths = list(getattr(connectors_package, "__path__", []) or [])
+        pkg_file = getattr(connectors_package, "__file__", None)
+        if pkg_file:
+            pkg_dir = str(Path(pkg_file).resolve().parent)
+            if pkg_dir not in search_paths:
+                search_paths.append(pkg_dir)
+
+        module_names = set(_BUILTIN_CONNECTOR_MODULES)
+        if search_paths:
+            for _, discovered_name, _ in pkgutil.iter_modules(search_paths):
+                module_names.add(discovered_name)
+
+        for name in sorted(module_names):
             try:
                 module = importlib.import_module(f"{connectors_package.__name__}.{name}")
             except ImportError as e:
