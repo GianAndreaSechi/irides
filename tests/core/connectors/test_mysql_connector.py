@@ -1,5 +1,8 @@
 import pytest
 import os
+
+pytest.importorskip("mysql.connector")
+
 from core.db_connector.connectors.mysql import MySQLConnector
 from core.db_connector.models import TableDescription
 from loguru import logger

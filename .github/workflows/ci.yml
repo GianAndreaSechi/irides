@@ -30,7 +30,7 @@ jobs:
 
       - name: Run offline test suite
         run: |
-          pytest -m "not integration" --ignore=tests/core/connectors/test_mysql_connector.py
+          pytest tests -m "not integration" --ignore=tests/core/connectors/test_mysql_connector.py
 
       - name: Build core and cli distributions
         run: |
