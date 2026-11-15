@@ -7,17 +7,25 @@ from dotenv import load_dotenv
 from loguru import logger
 import yaml
 
-# Containers mount each component's configuration in a different directory.
-# DB_CONFIG_FILE makes that location explicit while preserving normal local
-# dotenv discovery when it is not set.
-# An explicit DB_CONFIG_FILE is the authoritative source for database settings.
-# This matters in containers where an auxiliary env file may define optional
-# connector variables as empty strings.
-_db_config_file = os.getenv("DB_CONFIG_FILE")
-load_dotenv(
-    dotenv_path=_db_config_file or (Path.cwd() / ".env"),
-    override=bool(_db_config_file),
-)
+_dotenv_loaded = False
+
+
+def ensure_dotenv_loaded() -> None:
+    """Lazily load .env or DB_CONFIG_FILE when environment configurations are queried."""
+    global _dotenv_loaded
+    if _dotenv_loaded:
+        return
+    _db_config_file = os.getenv("DB_CONFIG_FILE")
+    if _db_config_file and not any(
+        _db_config_file.lower().endswith(ext) for ext in (".yaml", ".yml", ".json")
+    ):
+        load_dotenv(dotenv_path=_db_config_file, override=True)
+    else:
+        default_env = Path.cwd() / ".env"
+        if default_env.is_file():
+            load_dotenv(dotenv_path=default_env, override=False)
+    _dotenv_loaded = True
+
 
 CONFIG_SEARCH_FILENAMES = ["irides.yaml", "irides.yml", "irides.json"]
 
@@ -26,14 +34,17 @@ def discover_config_file(custom_path: Optional[str] = None) -> Optional[Path]:
     """Finds an explicit or default irides configuration file."""
     if custom_path:
         p = Path(custom_path).expanduser().resolve()
-        return p if p.is_file() else None
+        if not p.is_file():
+            raise FileNotFoundError(f"Configuration file not found: {custom_path}")
+        return p
 
     # Check environment variable
     env_file = os.getenv("IRIDES_CONFIG_FILE") or os.getenv("DB_CONFIG_FILE")
     if env_file and any(env_file.lower().endswith(ext) for ext in (".yaml", ".yml", ".json")):
         p = Path(env_file).expanduser().resolve()
-        if p.is_file():
-            return p
+        if not p.is_file():
+            raise FileNotFoundError(f"Configuration file specified in environment not found: {env_file}")
+        return p
 
     # Check current working directory
     cwd = Path.cwd()
@@ -65,8 +76,13 @@ def _expand_env_vars(data: Any) -> Any:
 
         def replace_var(match: re.Match) -> str:
             var_name = match.group(1)
-            default_val = match.group(2) if match.group(2) is not None else ""
-            return os.getenv(var_name, default_val)
+            has_default = match.group(2) is not None
+            default_val = match.group(2) if has_default else ""
+            val = os.getenv(var_name)
+            if val is None and not has_default:
+                logger.warning(f"Environment variable '${{{var_name}}}' is not set; expanding to empty string.")
+                return ""
+            return val if val is not None else default_val
 
         return pattern.sub(replace_var, data)
     elif isinstance(data, dict):
@@ -82,34 +98,45 @@ def load_file_configurations(file_path: Optional[str] = None) -> Dict[str, Dict[
     if not config_path:
         return {}
 
+    suffix = config_path.suffix.lower()
+    if suffix not in {".yaml", ".yml", ".json"}:
+        if file_path:
+            raise ValueError(
+                f"Unsupported configuration file format '{suffix}' for '{config_path}'. Use .yaml, .yml, or .json."
+            )
+        return {}
+
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            if config_path.suffix.lower() in {".yaml", ".yml"}:
-                raw = yaml.safe_load(f) or {}
-            elif config_path.suffix.lower() == ".json":
-                raw = json.load(f) or {}
+            if suffix in {".yaml", ".yml"}:
+                raw = yaml.safe_load(f)
             else:
-                return {}
+                raw = json.load(f)
     except Exception as e:
         logger.error(f"Failed to read config file {config_path}: {e}")
+        raise ValueError(f"Failed to parse configuration file '{config_path}': {e}") from e
+
+    if raw is None:
         return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"Configuration file '{config_path}' must contain a top-level mapping.")
 
     raw = _expand_env_vars(raw)
     targets_dict = raw.get("targets", raw)
     if not isinstance(targets_dict, dict):
-        return {}
+        raise ValueError(f"'targets' in '{config_path}' must be a mapping.")
 
     configs = {}
+    base_dir = config_path.parent
     for target_name, target_data in targets_dict.items():
         if not isinstance(target_data, dict):
-            continue
+            raise ValueError(f"Target '{target_name}' in '{config_path.name}' must be a mapping.")
 
         conn_type = target_data.get("type") or target_data.get("connector_type")
         if not conn_type:
             conn_type = _infer_target_type(target_name)
         if not conn_type:
-            logger.warning(f"Target '{target_name}' in {config_path.name} is missing 'type'.")
-            continue
+            raise ValueError(f"Target '{target_name}' in '{config_path.name}' is missing 'type'.")
 
         conn_type = conn_type.lower()
 
@@ -117,6 +144,17 @@ def load_file_configurations(file_path: Optional[str] = None) -> Dict[str, Dict[
             params = dict(target_data["connection_params"])
         else:
             params = {k: v for k, v in target_data.items() if k not in {"type", "connector_type"}}
+
+        # Resolve relative SQLite/DuckDB file paths relative to the config file directory if they don't exist in cwd
+        if conn_type in {"sqlite", "duckdb"} and isinstance(params.get("database"), str):
+            db_val = params["database"]
+            if db_val and "instance_name" not in params:
+                params["instance_name"] = db_val
+            if db_val and db_val != ":memory:" and not Path(db_val).is_absolute():
+                cwd_candidate = Path.cwd() / db_val
+                cfg_candidate = base_dir / db_val
+                if not cwd_candidate.exists() and cfg_candidate.exists():
+                    params["database"] = str(cfg_candidate.resolve())
 
         # Default port handling if missing and applicable
         if conn_type == "mysql" and "port" not in params:
@@ -353,15 +391,24 @@ def _build_target_config(target_name: str) -> dict:
 
 
 def get_target_configurations() -> dict:
+    ensure_dotenv_loaded()
     targets_raw = _env("DB_TARGETS")
     if not targets_raw:
         return {}
 
     configs = {}
+    seen_keys: Dict[str, str] = {}
     target_names = [name.strip() for name in targets_raw.split(",") if name.strip()]
     for target_name in target_names:
         if target_name in configs:
             raise ValueError(f"Duplicate DB target name '{target_name}'.")
+        norm_key = _target_key(target_name)
+        if norm_key in seen_keys:
+            raise ValueError(
+                f"DB target '{target_name}' collides with '{seen_keys[norm_key]}' "
+                f"after environment key normalization ('DB_TARGET_{norm_key}_*')."
+            )
+        seen_keys[norm_key] = target_name
         configs[target_name] = _build_target_config(target_name)
     return configs
 
@@ -378,6 +425,7 @@ def get_db_configurations(config_file: Optional[str] = None) -> dict:
           DB_TARGET_SALES_MYSQL_TYPE=mysql
           DB_TARGET_SALES_MYSQL_HOST=...
     """
+    ensure_dotenv_loaded()
     file_configs = load_file_configurations(config_file)
     env_configs = get_target_configurations()
     configs = {**file_configs, **env_configs}

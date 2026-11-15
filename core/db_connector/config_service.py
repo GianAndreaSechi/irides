@@ -50,8 +50,10 @@ class ConfigService:
         self, config_name: str, instance_name: str, no_cache: bool = False
     ) -> bool:
         """Return whether an instance belongs to a database configuration."""
+        details = self._get_connector_details(config_name)
+        connector_type = details["connector_type"]
         configured_hosts = self._get_hosts(config_name)
-        if configured_hosts:
+        if configured_hosts and connector_type not in {"trino", "presto"}:
             return instance_name in configured_hosts
         return instance_name in {
             instance.name for instance in self.list_instances(config_name, no_cache=no_cache)

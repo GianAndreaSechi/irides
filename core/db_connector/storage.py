@@ -1,14 +1,28 @@
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 import json
 import math
-import re
-from datetime import datetime, timezone
 import os
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+import re
+import tempfile
+from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from core.db_connector.exporting import ExportFormat, ExportOptions, FileArtifactStore
+from core.db_connector.exporting.artifact_store import desanitize_segment, sanitize_segment
+
+
+class MetadataStorageError(RuntimeError):
+    """Raised when metadata persistence or reading fails unexpectedly."""
+
+
+class CorruptedMetadataError(MetadataStorageError):
+    """Raised when a metadata file exists on disk but contains invalid JSON."""
+
+
+class AmbiguousMetadataError(ValueError):
+    """Raised when multiple configurations match a table lookup without config_name."""
 
 
 def build_metadata_key(
@@ -34,6 +48,7 @@ class BaseMetadataStore(ABC):
         export_options: Optional[ExportOptions] = None,
         save_metadata: bool = True,
         save_markdown: Optional[bool] = None,
+        rebuild_index: bool = True,
     ) -> Dict[str, Any]:
         """Save or update table metadata.
 
@@ -54,29 +69,63 @@ class BaseMetadataStore(ABC):
         """Retrieve stored table metadata."""
         raise NotImplementedError
 
+    def list_configs(self) -> List[str]:
+        """List all configuration target names that have stored metadata."""
+        return []
+
     @abstractmethod
-    def list_instances(self, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
-        """List all unique instance names across all configs, paginated."""
+    def list_instances(
+        self, page: int = 1, page_size: int = 20, config_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """List all unique instance names across configs, paginated."""
         raise NotImplementedError
 
     @abstractmethod
-    def list_databases(self, instance_name: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+    def list_databases(
+        self,
+        instance_name: str,
+        page: int = 1,
+        page_size: int = 20,
+        config_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """List all database/schema names for a given instance, paginated."""
         raise NotImplementedError
 
     @abstractmethod
-    def list_tables_metadata(self, instance_name: str, database_name: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+    def list_tables_metadata(
+        self,
+        instance_name: str,
+        database_name: str,
+        page: int = 1,
+        page_size: int = 20,
+        config_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """List all table names for a given instance+database, paginated."""
         raise NotImplementedError
 
     @abstractmethod
-    def find_table_metadata(self, instance_name: str, database_name: str, table_name: str) -> Optional[Dict[str, Any]]:
-        """Find table metadata by instance, database and table name (searches across all configs)."""
+    def find_table_metadata(
+        self,
+        instance_name: str,
+        database_name: str,
+        table_name: str,
+        config_name: Optional[str] = None,
+        *,
+        strict: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Find table metadata by instance, database and table name (optionally scoped by config_name)."""
         raise NotImplementedError
 
     @abstractmethod
     def update_table_metadata(
-        self, instance_name: str, database_name: str, table_name: str, payload: Dict[str, Any]
+        self,
+        instance_name: str,
+        database_name: str,
+        table_name: str,
+        payload: Dict[str, Any],
+        config_name: Optional[str] = None,
+        *,
+        strict: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Merge payload into an existing metadata document.
 
@@ -96,15 +145,28 @@ class FileMetadataStore(BaseMetadataStore):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         if export_dir is None:
-            export_dir = os.getenv("STORAGE_EXPORT_DIR")
-        if export_dir is None:
-            export_dir = str(self.base_dir / "exports") if explicit_base_dir else "storage/exports"
+            if explicit_base_dir:
+                export_dir = str(self.base_dir / "exports")
+            else:
+                export_dir = os.getenv("STORAGE_EXPORT_DIR", "storage/exports")
         self.artifact_store = FileArtifactStore(export_dir)
 
     @staticmethod
     def _sanitize(name: str) -> str:
-        """Replace any character that is not alphanumeric, dot, hyphen, or underscore."""
+        """Encode a logical name into a safe, reversible, collision-free path segment."""
+        return sanitize_segment(name)
+
+    @staticmethod
+    def _legacy_sanitize(name: str) -> str:
+        """Legacy lossy sanitizer retained for backward-compatible file lookups."""
         return re.sub(r"[^\w.\-]", "_", name)
+
+    def _ensure_confined(self, path: Path) -> Path:
+        base_resolved = self.base_dir.resolve()
+        target_resolved = path.resolve()
+        if not target_resolved.is_relative_to(base_resolved):
+            raise ValueError(f"Refusing to access path '{path}' outside metadata root '{self.base_dir}'.")
+        return path
 
     def _get_file_path(
         self, config_name: str, instance_name: str, schema_name: str, table_name: str
@@ -113,7 +175,99 @@ class FileMetadataStore(BaseMetadataStore):
         safe_instance = self._sanitize(instance_name)
         safe_schema = self._sanitize(schema_name)
         safe_table = self._sanitize(table_name)
-        return self.base_dir / safe_config / safe_instance / safe_schema / f"{safe_table}.json"
+        candidate = self.base_dir / safe_config / safe_instance / safe_schema / f"{safe_table}.json"
+        return self._ensure_confined(candidate)
+
+    def _get_legacy_file_path(
+        self, config_name: str, instance_name: str, schema_name: str, table_name: str
+    ) -> Optional[Path]:
+        if any(seg in {"", ".", ".."} for seg in (config_name, instance_name, schema_name, table_name)):
+            return None
+        safe_config = self._legacy_sanitize(config_name)
+        safe_instance = self._legacy_sanitize(instance_name)
+        safe_schema = self._legacy_sanitize(schema_name)
+        safe_table = self._legacy_sanitize(table_name)
+        candidate = self.base_dir / safe_config / safe_instance / safe_schema / f"{safe_table}.json"
+        try:
+            return self._ensure_confined(candidate)
+        except ValueError:
+            return None
+
+    def _resolve_existing_file_path(
+        self, config_name: str, instance_name: str, schema_name: str, table_name: str
+    ) -> Optional[Path]:
+        primary = self._get_file_path(config_name, instance_name, schema_name, table_name)
+        if primary.exists():
+            return primary
+        legacy = self._get_legacy_file_path(config_name, instance_name, schema_name, table_name)
+        if legacy is not None and legacy.exists():
+            return legacy
+        return None
+
+    def _cleanup_legacy_file(self, legacy_path: Optional[Path], canonical_path: Path) -> None:
+        """Remove a legacy metadata file after migrating to its canonical path, pruning empty dirs."""
+        if legacy_path is None or legacy_path == canonical_path or not legacy_path.exists():
+            return
+        try:
+            legacy_path.unlink()
+            base_resolved = self.base_dir.resolve()
+            parent = legacy_path.parent
+            while (
+                parent.exists()
+                and parent.resolve() != base_resolved
+                and parent.resolve().is_relative_to(base_resolved)
+            ):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        except OSError as e:
+            logger.debug(f"FileMetadataStore: Could not remove legacy path {legacy_path}: {e}")
+
+    @staticmethod
+    def _read_json_file(file_path: Path, *, raise_on_corrupt: bool = False) -> Optional[Dict[str, Any]]:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise CorruptedMetadataError(f"Metadata file '{file_path}' does not contain a JSON object.")
+            return data
+        except FileNotFoundError:
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"FileMetadataStore: Corrupted JSON in {file_path}: {e}")
+            if raise_on_corrupt:
+                raise CorruptedMetadataError(f"Corrupted metadata JSON in '{file_path}': {e}") from e
+            return None
+        except OSError as e:
+            logger.error(f"FileMetadataStore: Error reading {file_path}: {e}")
+            if raise_on_corrupt:
+                raise MetadataStorageError(f"Failed to read metadata file '{file_path}': {e}") from e
+            return None
+
+    @staticmethod
+    def _atomic_write_json(file_path: Path, payload: Dict[str, Any]) -> None:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=file_path.parent, delete=False
+            ) as tmp:
+                json.dump(payload, tmp, indent=2, ensure_ascii=False)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                temp_path = Path(tmp.name)
+            temp_path.chmod(0o644)
+            os.replace(temp_path, file_path)
+        except Exception as e:
+            if temp_path is not None and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+            logger.error(f"FileMetadataStore: Failed to write {file_path}: {e}")
+            raise MetadataStorageError(f"Failed to write metadata file '{file_path}': {e}") from e
 
     def get_table_metadata(
         self,
@@ -122,15 +276,12 @@ class FileMetadataStore(BaseMetadataStore):
         schema_name: str,
         table_name: str,
     ) -> Optional[Dict[str, Any]]:
-        file_path = self._get_file_path(config_name, instance_name, schema_name, table_name)
-        if not file_path.exists():
+        file_path = self._resolve_existing_file_path(
+            config_name, instance_name, schema_name, table_name
+        )
+        if file_path is None:
             return None
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"FileMetadataStore: Error reading {file_path}: {e}")
-            return None
+        return self._read_json_file(file_path)
 
     # Keys managed entirely by the system — never carried forward from existing data
     _SYSTEM_KEYS = frozenset({
@@ -150,6 +301,7 @@ class FileMetadataStore(BaseMetadataStore):
         export_options: Optional[ExportOptions] = None,
         save_metadata: bool = True,
         save_markdown: Optional[bool] = None,
+        rebuild_index: bool = True,
     ) -> Dict[str, Any]:
         options = export_options or ExportOptions()
         if export_options is None and save_markdown is not None:
@@ -161,17 +313,8 @@ class FileMetadataStore(BaseMetadataStore):
             options = options.model_copy(update={"formats": formats})
 
         file_path = self._get_file_path(config_name, instance_name, schema_name, table_name)
-        if save_metadata:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-
+        legacy_path = self._get_legacy_file_path(config_name, instance_name, schema_name, table_name)
         existing_data = self.get_table_metadata(config_name, instance_name, schema_name, table_name) or {}
-
-        # Skip write if schema is unchanged (preserves updated_at and avoids noise)
-        if only_if_changed and existing_data:
-            if existing_data.get("schema_description") == schema_description:
-                self.artifact_store.export(existing_data, options)
-                logger.info(f"FileMetadataStore: No schema change for {table_name}, skipping write.")
-                return {**existing_data, "_unchanged": True}
 
         # Preserve existing ai_documentation if not passed in this call
         final_ai_doc = (
@@ -179,6 +322,18 @@ class FileMetadataStore(BaseMetadataStore):
             if ai_documentation is not None
             else existing_data.get("ai_documentation")
         )
+
+        # Skip write if both schema and AI documentation are unchanged
+        if only_if_changed and existing_data:
+            schema_unchanged = existing_data.get("schema_description") == schema_description
+            ai_unchanged = existing_data.get("ai_documentation") == final_ai_doc
+            if schema_unchanged and ai_unchanged:
+                if save_metadata and not file_path.exists() and legacy_path and legacy_path.exists():
+                    self._atomic_write_json(file_path, existing_data)
+                    self._cleanup_legacy_file(legacy_path, file_path)
+                self.artifact_store.export(existing_data, options, rebuild_index=rebuild_index)
+                logger.info(f"FileMetadataStore: No schema or AI change for {table_name}, skipping write.")
+                return {**existing_data, "_unchanged": True}
 
         # Carry forward any custom fields added by humans (owner, tags, notes, etc.)
         custom_fields = {k: v for k, v in existing_data.items() if k not in self._SYSTEM_KEYS}
@@ -196,16 +351,12 @@ class FileMetadataStore(BaseMetadataStore):
         }
 
         if save_metadata:
-            try:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(metadata_record, f, indent=2, ensure_ascii=False)
-                logger.info(f"FileMetadataStore: Saved table metadata for {table_name} -> {file_path}")
-            except Exception as e:
-                logger.error(f"FileMetadataStore: Failed to write {file_path}: {e}")
+            self._atomic_write_json(file_path, metadata_record)
+            self._cleanup_legacy_file(legacy_path, file_path)
+            logger.info(f"FileMetadataStore: Saved table metadata for {table_name} -> {file_path}")
 
-        self.artifact_store.export(metadata_record, options)
+        self.artifact_store.export(metadata_record, options, rebuild_index=rebuild_index)
         return metadata_record
-
 
     def _paginate(self, items: List[str], page: int, page_size: int) -> Dict[str, Any]:
         total = len(items)
@@ -218,84 +369,198 @@ class FileMetadataStore(BaseMetadataStore):
             "pages": math.ceil(total / page_size) if total > 0 else 0,
         }
 
-    def list_instances(self, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
-        instances: set = set()
-        if self.base_dir.exists():
-            for config_dir in self.base_dir.iterdir():
-                if config_dir.is_dir():
-                    for instance_dir in config_dir.iterdir():
-                        if instance_dir.is_dir():
-                            instances.add(instance_dir.name)
-        return self._paginate(sorted(instances), page, page_size)
+    @classmethod
+    def _dedup_logical_names(cls, raw_names: List[str]) -> List[str]:
+        decoded = {desanitize_segment(name) for name in raw_names}
+        shadows = {
+            cls._legacy_sanitize(d)
+            for d in decoded
+            if cls._sanitize(d) != cls._legacy_sanitize(d)
+        }
+        return sorted(d for d in decoded if d not in shadows)
 
-    def list_databases(self, instance_name: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
-        sanitized = self._sanitize(instance_name)
-        databases: set = set()
-        if self.base_dir.exists():
-            for config_dir in self.base_dir.iterdir():
-                if config_dir.is_dir():
-                    instance_dir = config_dir / sanitized
-                    if instance_dir.is_dir():
-                        for db_dir in instance_dir.iterdir():
-                            if db_dir.is_dir():
-                                databases.add(db_dir.name)
-        return self._paginate(sorted(databases), page, page_size)
+    def _iter_config_dirs(self, config_name: Optional[str] = None) -> List[Path]:
+        if not self.base_dir.exists():
+            return []
+        if config_name is not None:
+            candidates = []
+            # Order canonical path before legacy path
+            for candidate_name in (self._sanitize(config_name), self._legacy_sanitize(config_name)):
+                candidate = self._ensure_confined(self.base_dir / candidate_name)
+                if candidate.is_dir() and candidate not in candidates:
+                    candidates.append(candidate)
+            return candidates
+        return sorted(
+            [
+                d
+                for d in self.base_dir.iterdir()
+                if d.is_dir() and d.name != "exports"
+            ],
+            key=lambda p: p.name,
+        )
 
-    def list_tables_metadata(self, instance_name: str, database_name: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
-        sanitized_instance = self._sanitize(instance_name)
-        sanitized_db = self._sanitize(database_name)
-        tables: set = set()
-        if self.base_dir.exists():
-            for config_dir in self.base_dir.iterdir():
-                if config_dir.is_dir():
-                    db_dir = config_dir / sanitized_instance / sanitized_db
+    def _matching_subdirs(self, parent_dir: Path, logical_name: str) -> List[Path]:
+        if not parent_dir.is_dir():
+            return []
+        matches = []
+        # Order canonical segment before legacy segment
+        for seg in (self._sanitize(logical_name), self._legacy_sanitize(logical_name)):
+            candidate = self._ensure_confined(parent_dir / seg)
+            if candidate.is_dir() and candidate not in matches:
+                matches.append(candidate)
+        return matches
+
+    def list_configs(self) -> List[str]:
+        raw_names = [d.name for d in self._iter_config_dirs(None)]
+        return self._dedup_logical_names(raw_names)
+
+    def list_instances(
+        self, page: int = 1, page_size: int = 20, config_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        raw_names: List[str] = []
+        for config_dir in self._iter_config_dirs(config_name):
+            for instance_dir in config_dir.iterdir():
+                if instance_dir.is_dir():
+                    raw_names.append(instance_dir.name)
+        return self._paginate(self._dedup_logical_names(raw_names), page, page_size)
+
+    def list_databases(
+        self,
+        instance_name: str,
+        page: int = 1,
+        page_size: int = 20,
+        config_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        raw_names: List[str] = []
+        for config_dir in self._iter_config_dirs(config_name):
+            for instance_dir in self._matching_subdirs(config_dir, instance_name):
+                for db_dir in instance_dir.iterdir():
                     if db_dir.is_dir():
-                        for f in db_dir.iterdir():
-                            if f.is_file() and f.suffix == ".json":
-                                tables.add(f.stem)
-        return self._paginate(sorted(tables), page, page_size)
+                        raw_names.append(db_dir.name)
+        return self._paginate(self._dedup_logical_names(raw_names), page, page_size)
 
-    def find_table_metadata(self, instance_name: str, database_name: str, table_name: str) -> Optional[Dict[str, Any]]:
-        sanitized_instance = self._sanitize(instance_name)
-        sanitized_db = self._sanitize(database_name)
-        sanitized_table = self._sanitize(table_name)
-        if self.base_dir.exists():
-            for config_dir in self.base_dir.iterdir():
-                if config_dir.is_dir():
-                    file_path = config_dir / sanitized_instance / sanitized_db / f"{sanitized_table}.json"
-                    if file_path.exists():
-                        try:
-                            with open(file_path, "r", encoding="utf-8") as f:
-                                return json.load(f)
-                        except Exception as e:
-                            logger.warning(f"FileMetadataStore: Error reading {file_path}: {e}")
-        return None
+    def list_tables_metadata(
+        self,
+        instance_name: str,
+        database_name: str,
+        page: int = 1,
+        page_size: int = 20,
+        config_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        raw_names: List[str] = []
+        for config_dir in self._iter_config_dirs(config_name):
+            for instance_dir in self._matching_subdirs(config_dir, instance_name):
+                for db_dir in self._matching_subdirs(instance_dir, database_name):
+                    for f in db_dir.iterdir():
+                        if f.is_file() and f.suffix == ".json":
+                            raw_names.append(f.stem)
+        return self._paginate(self._dedup_logical_names(raw_names), page, page_size)
 
-    def _find_file_path(self, instance_name: str, database_name: str, table_name: str) -> Optional[Path]:
-        sanitized_instance = self._sanitize(instance_name)
-        sanitized_db = self._sanitize(database_name)
-        sanitized_table = self._sanitize(table_name)
-        if self.base_dir.exists():
-            for config_dir in self.base_dir.iterdir():
-                if config_dir.is_dir():
-                    candidate = config_dir / sanitized_instance / sanitized_db / f"{sanitized_table}.json"
-                    if candidate.exists():
-                        return candidate
-        return None
+    def _find_matching_file_paths(
+        self,
+        instance_name: str,
+        database_name: str,
+        table_name: str,
+        config_name: Optional[str] = None,
+    ) -> List[Path]:
+        matches: List[Path] = []
+        # Check canonical stem first, then legacy stem
+        table_stems = []
+        for s in (self._sanitize(table_name), self._legacy_sanitize(table_name)):
+            if s not in table_stems:
+                table_stems.append(s)
+        for config_dir in self._iter_config_dirs(config_name):
+            for instance_dir in self._matching_subdirs(config_dir, instance_name):
+                for db_dir in self._matching_subdirs(instance_dir, database_name):
+                    for stem in table_stems:
+                        candidate = self._ensure_confined(db_dir / f"{stem}.json")
+                        if candidate.exists() and candidate not in matches:
+                            matches.append(candidate)
+        return matches
 
-    _PROTECTED_FIELDS = frozenset({"metadata_key", "config_name", "instance_name", "schema_name", "table_name", "updated_at"})
+    def _config_name_for_path(self, path: Path) -> str:
+        data = self._read_json_file(path)
+        if isinstance(data, dict) and data.get("config_name"):
+            return str(data["config_name"])
+        return desanitize_segment(path.parent.parent.parent.name)
 
-    def update_table_metadata(
-        self, instance_name: str, database_name: str, table_name: str, payload: Dict[str, Any]
+    def _resolve_single_match(
+        self,
+        instance_name: str,
+        database_name: str,
+        table_name: str,
+        config_name: Optional[str] = None,
+        *,
+        strict: bool = False,
+    ) -> Optional[Path]:
+        matches = self._find_matching_file_paths(
+            instance_name, database_name, table_name, config_name=config_name
+        )
+        if not matches:
+            return None
+        # Group by logical config_name so a legacy + canonical file in the same config is never treated as ambiguous
+        by_config: Dict[str, List[Path]] = {}
+        for p in matches:
+            cfg = self._config_name_for_path(p)
+            by_config.setdefault(cfg, []).append(p)
+
+        if len(by_config) > 1:
+            configs = sorted(by_config.keys())
+            msg = (
+                f"Ambiguous metadata reference for '{instance_name}/{database_name}/{table_name}': "
+                f"found in multiple configurations {configs}. Specify config_name to disambiguate."
+            )
+            if strict:
+                raise AmbiguousMetadataError(msg)
+            logger.warning(f"FileMetadataStore: {msg}")
+
+        first_cfg = next(iter(by_config))
+        cfg_matches = by_config[first_cfg]
+        try:
+            canonical = self._get_file_path(first_cfg, instance_name, database_name, table_name)
+            if canonical in cfg_matches:
+                return canonical
+        except ValueError:
+            pass
+        return cfg_matches[0]
+
+    def find_table_metadata(
+        self,
+        instance_name: str,
+        database_name: str,
+        table_name: str,
+        config_name: Optional[str] = None,
+        *,
+        strict: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        file_path = self._find_file_path(instance_name, database_name, table_name)
+        file_path = self._resolve_single_match(
+            instance_name, database_name, table_name, config_name=config_name, strict=strict
+        )
         if file_path is None:
             return None
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-        except Exception as e:
-            logger.warning(f"FileMetadataStore: Error reading {file_path}: {e}")
+        return self._read_json_file(file_path)
+
+    _PROTECTED_FIELDS = frozenset({
+        "metadata_key", "config_name", "instance_name", "schema_name", "table_name", "updated_at"
+    })
+
+    def update_table_metadata(
+        self,
+        instance_name: str,
+        database_name: str,
+        table_name: str,
+        payload: Dict[str, Any],
+        config_name: Optional[str] = None,
+        *,
+        strict: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        file_path = self._resolve_single_match(
+            instance_name, database_name, table_name, config_name=config_name, strict=strict
+        )
+        if file_path is None:
+            return None
+        existing = self._read_json_file(file_path, raise_on_corrupt=True)
+        if existing is None:
             return None
 
         for key, value in payload.items():
@@ -303,16 +568,53 @@ class FileMetadataStore(BaseMetadataStore):
                 existing[key] = value
         existing["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-        try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(existing, f, indent=2, ensure_ascii=False)
-            logger.info(f"FileMetadataStore: Updated metadata for {table_name} -> {file_path}")
-        except Exception as e:
-            logger.error(f"FileMetadataStore: Failed to write {file_path}: {e}")
-            return None
+        cfg = str(existing.get("config_name") or config_name or desanitize_segment(file_path.parent.parent.parent.name))
+        inst = str(existing.get("instance_name") or instance_name)
+        sch = str(existing.get("schema_name") or database_name)
+        tbl = str(existing.get("table_name") or table_name)
+        canonical_path = self._get_file_path(cfg, inst, sch, tbl)
+
+        self._atomic_write_json(canonical_path, existing)
+        self._cleanup_legacy_file(file_path, canonical_path)
+        logger.info(f"FileMetadataStore: Updated metadata for {table_name} -> {canonical_path}")
 
         self.artifact_store.export(existing, ExportOptions())
         return existing
+
+    def iter_all_metadata(self, config_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return all stored metadata records (optionally filtered by config_name)."""
+        by_key: Dict[str, Dict[str, Any]] = {}
+        for config_dir in self._iter_config_dirs(config_name):
+            for json_file in sorted(config_dir.rglob("*.json")):
+                record = self._read_json_file(json_file)
+                if record is None:
+                    continue
+                m_key = record.get("metadata_key") or str(json_file)
+                if m_key not in by_key:
+                    by_key[m_key] = record
+                else:
+                    # Prefer canonical path record if both legacy and canonical exist on disk
+                    cfg = str(record.get("config_name") or "")
+                    inst = str(record.get("instance_name") or "")
+                    sch = str(record.get("schema_name") or "")
+                    tbl = str(record.get("table_name") or "")
+                    if cfg and inst and sch and tbl:
+                        try:
+                            if json_file == self._get_file_path(cfg, inst, sch, tbl):
+                                by_key[m_key] = record
+                        except ValueError:
+                            pass
+        return list(by_key.values())
+
+    def export_all(
+        self,
+        export_options: Optional[ExportOptions] = None,
+        config_name: Optional[str] = None,
+    ) -> int:
+        """Regenerate Markdown/OKF exports from stored JSON metadata without querying databases."""
+        options = export_options or ExportOptions()
+        records = self.iter_all_metadata(config_name=config_name)
+        return self.artifact_store.export_batch(records, options)
 
 
 def get_metadata_store(store_type: Optional[str] = None) -> BaseMetadataStore:
