@@ -31,6 +31,11 @@ def render_okf(record: Dict[str, Any]) -> str:
     )
     if record.get("owner"):
         frontmatter["owner"] = record["owner"]
+    classification = record.get("classification") or record.get("data_classification")
+    if classification:
+        frontmatter["classification"] = classification
+    if record.get("notes"):
+        frontmatter["notes"] = record["notes"]
 
     yaml_text = yaml.safe_dump(
         frontmatter,

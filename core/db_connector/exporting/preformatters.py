@@ -1,5 +1,18 @@
 from typing import Any, Dict
 
+_SYSTEM_KEYS = frozenset(
+    {
+        "metadata_key",
+        "config_name",
+        "instance_name",
+        "schema_name",
+        "table_name",
+        "updated_at",
+        "schema_description",
+        "ai_documentation",
+    }
+)
+
 
 def essential_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """Return the compact, deterministic view used by the default exporters."""
@@ -30,26 +43,40 @@ def essential_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "indexes": [
             index
             for index in schema.get("indexes") or []
-            if index.get("is_unique") and not index.get("is_primary")
+            if (index.get("is_unique") and not index.get("is_primary"))
+            or index.get("type") in ("GSI", "LSI")
         ],
         "partitions": schema.get("partitions") or [],
     }
 
-    compact = {
-        key: record.get(key)
-        for key in (
-            "metadata_key",
-            "config_name",
-            "instance_name",
-            "schema_name",
-            "table_name",
-            "updated_at",
-            "owner",
-            "tags",
-            "status",
-        )
-        if record.get(key) not in (None, "", [], {})
-    }
+    compact: Dict[str, Any] = {}
+    for key in (
+        "metadata_key",
+        "config_name",
+        "instance_name",
+        "schema_name",
+        "table_name",
+        "updated_at",
+        "owner",
+        "tags",
+        "status",
+        "notes",
+        "classification",
+        "data_classification",
+    ):
+        if record.get(key) not in (None, "", [], {}):
+            compact[key] = record.get(key)
+
+    # Carry forward any additional custom user annotations
+    for key, value in record.items():
+        if (
+            key not in _SYSTEM_KEYS
+            and key not in compact
+            and not key.startswith("_")
+            and value not in (None, "", [], {})
+        ):
+            compact[key] = value
+
     compact["schema_description"] = {
         key: value
         for key, value in compact_schema.items()
